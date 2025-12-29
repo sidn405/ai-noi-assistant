@@ -130,7 +130,7 @@ class Analytics(Base):
     metric_type = Column(String(100))  # followers, engagement_rate, reach, etc.
     value = Column(Float)
     date = Column(DateTime, default=datetime.utcnow)
-    metadata = Column(JSON, nullable=True)
+    extra_data = Column(JSON, nullable=True)  # Renamed from 'metadata' (reserved by SQLAlchemy)
 
 # Create all tables
 Base.metadata.create_all(bind=engine)
