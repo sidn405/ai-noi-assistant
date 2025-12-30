@@ -35,7 +35,7 @@ app.add_middleware(
 )
 
 # Database setup
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost/noi_social")
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -168,6 +168,11 @@ class ContentAnalysis(BaseModel):
     content: str
     num_quotes: int = 5
 
+from content_processor import ContentProcessor
+
+# Initialize content processor
+content_processor = ContentProcessor()
+
 # ==================== CONTENT MANAGEMENT ====================
 
 @app.post("/api/content/upload")
@@ -210,6 +215,191 @@ async def upload_content(
         "message": "Content uploaded successfully",
         "file_path": str(file_path)
     }
+
+@app.post("/api/content/process-and-extract")
+async def process_and_extract_quotes(
+    file: UploadFile = File(...),
+    title: str = Form(...),
+    content_type: str = Form(...),
+    source: Optional[str] = Form(None),
+    num_quotes: int = Form(10),
+    db: Session = Depends(get_db)
+):
+    """
+    AUTOMATED PIPELINE: Upload file → Transcribe → Extract quotes → Save all to DB
+    This is the all-in-one endpoint you need!
+    """
+    
+    # Create upload directory
+    upload_dir = Path("uploads")
+    upload_dir.mkdir(exist_ok=True)
+    
+    # Generate unique filename
+    file_ext = file.filename.split('.')[-1]
+    unique_filename = f"{uuid.uuid4()}.{file_ext}"
+    file_path = upload_dir / unique_filename
+    
+    # Save file
+    with open(file_path, "wb") as f:
+        content = await file.read()
+        f.write(content)
+    
+    # AUTOMATED PROCESSING
+    try:
+        result = content_processor.process_file(
+            file_path=str(file_path),
+            file_type=content_type,
+            source=source,
+            num_quotes=num_quotes,
+            upload_to_s3=True  # Upload to S3 if configured
+        )
+        
+        if not result['success']:
+            raise HTTPException(status_code=500, detail=result['error'])
+        
+        # Save content to DB
+        db_content = Content(
+            title=title,
+            content_type=content_type,
+            file_path=result.get('s3_url') or str(file_path),
+            transcription=result['transcription'],
+            extracted_quotes=result['quotes'],
+            source=source
+        )
+        db.add(db_content)
+        db.commit()
+        db.refresh(db_content)
+        
+        # Save quotes to DB
+        saved_quotes = []
+        for quote_data in result['quotes']:
+            quote = Quote(
+                quote_text=quote_data['quote_text'],
+                author=quote_data.get('author', source or 'Unknown'),
+                category=quote_data.get('category', 'wisdom'),
+                content_id=db_content.id,
+                ai_generated=True
+            )
+            db.add(quote)
+            saved_quotes.append(quote)
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "content_id": db_content.id,
+            "transcription_length": len(result['transcription']) if result['transcription'] else 0,
+            "quotes_extracted": len(saved_quotes),
+            "quotes": result['quotes'],
+            "s3_url": result.get('s3_url'),
+            "message": f"✅ Processed {title}: extracted {len(saved_quotes)} quotes"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+
+
+@app.post("/api/content/batch-process")
+async def batch_process_files(
+    files: List[UploadFile] = File(...),
+    sources: Optional[str] = Form(None),  # Comma-separated sources
+    num_quotes_per_file: int = Form(10),
+    db: Session = Depends(get_db)
+):
+    """
+    BATCH PROCESSING: Upload multiple files at once and process them all
+    Perfect for processing hours of content quickly!
+    """
+    
+    upload_dir = Path("uploads")
+    upload_dir.mkdir(exist_ok=True)
+    
+    # Parse sources (comma-separated)
+    source_list = sources.split(',') if sources else []
+    
+    # Save all files first
+    saved_files = []
+    for i, file in enumerate(files):
+        file_ext = file.filename.split('.')[-1]
+        unique_filename = f"{uuid.uuid4()}.{file_ext}"
+        file_path = upload_dir / unique_filename
+        
+        with open(file_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+        
+        # Determine file type from extension
+        if file_ext.lower() in ['mp3', 'wav', 'm4a', 'aac']:
+            file_type = 'audio'
+        elif file_ext.lower() in ['mp4', 'mov', 'avi', 'mkv']:
+            file_type = 'video'
+        else:
+            file_type = 'text'
+        
+        source = source_list[i] if i < len(source_list) else None
+        
+        saved_files.append((str(file_path), file_type, source, file.filename))
+    
+    # Batch process all files
+    try:
+        batch_results = []
+        total_quotes = 0
+        
+        for file_path, file_type, source, original_name in saved_files:
+            result = content_processor.process_file(
+                file_path=file_path,
+                file_type=file_type,
+                source=source,
+                num_quotes=num_quotes_per_file,
+                upload_to_s3=True
+            )
+            
+            if result['success']:
+                # Save to database
+                db_content = Content(
+                    title=Path(original_name).stem,
+                    content_type=file_type,
+                    file_path=result.get('s3_url') or file_path,
+                    transcription=result['transcription'],
+                    extracted_quotes=result['quotes'],
+                    source=source
+                )
+                db.add(db_content)
+                db.commit()
+                db.refresh(db_content)
+                
+                # Save quotes
+                for quote_data in result['quotes']:
+                    quote = Quote(
+                        quote_text=quote_data['quote_text'],
+                        author=quote_data.get('author', source or 'Unknown'),
+                        category=quote_data.get('category', 'wisdom'),
+                        content_id=db_content.id,
+                        ai_generated=True
+                    )
+                    db.add(quote)
+                
+                db.commit()
+                total_quotes += len(result['quotes'])
+            
+            batch_results.append({
+                "filename": original_name,
+                "success": result['success'],
+                "quotes_extracted": len(result['quotes']) if result['success'] else 0,
+                "error": result.get('error')
+            })
+        
+        return {
+            "success": True,
+            "files_processed": len(files),
+            "total_quotes_extracted": total_quotes,
+            "results": batch_results,
+            "message": f"✅ Batch processed {len(files)} files: {total_quotes} total quotes extracted"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Batch processing failed: {str(e)}")
+
 
 @app.post("/api/content/transcribe/{content_id}")
 async def transcribe_content(content_id: int, db: Session = Depends(get_db)):
