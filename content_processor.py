@@ -112,11 +112,21 @@ class ContentProcessor:
             
             logger.info(f"📊 File size: {file_size / 1024 / 1024:.2f} MB")
             
-            # Use OpenAI Whisper API with correct syntax
+            # Check if file is too large for Whisper (25MB limit)
+            if file_size > 25 * 1024 * 1024:
+                logger.warning(f"⚠️ File is larger than 25MB, may need to be split or compressed")
+            
+            # Use OpenAI Whisper API
             with open(file_path, 'rb') as audio_file:
-                # Use the global openai module (version 1.3.5 compatible)
+                # Initialize client with minimal config
                 from openai import OpenAI
-                client = OpenAI(api_key=self.openai_api_key)
+                client = OpenAI(
+                    api_key=self.openai_api_key,
+                    timeout=600.0,  # 10 minute timeout for large files
+                    max_retries=2
+                )
+                
+                logger.info("🔄 Sending to Whisper API...")
                 
                 transcript = client.audio.transcriptions.create(
                     model="whisper-1",
@@ -148,9 +158,16 @@ class ContentProcessor:
         try:
             logger.info(f"💭 Extracting {num_quotes} quotes from {len(text)} characters")
             
-            # Initialize OpenAI client
+            # Initialize OpenAI client with minimal config
             from openai import OpenAI
-            client = OpenAI(api_key=self.openai_api_key)
+            client = OpenAI(
+                api_key=self.openai_api_key,
+                timeout=120.0,
+                max_retries=2
+            )
+            
+            # Limit text to avoid token limits
+            text_sample = text[:8000] if len(text) > 8000 else text
             
             prompt = f"""Extract {num_quotes} powerful, meaningful quotes from this Nation of Islam content.
             
@@ -162,7 +179,7 @@ Focus on:
 - Justice and truth
 
 Content:
-{text[:4000]}
+{text_sample}
 
 Return ONLY a JSON array with this exact format:
 [
@@ -175,6 +192,8 @@ Return ONLY a JSON array with this exact format:
 
 Make quotes concise (under 280 characters for Twitter). Extract the most powerful statements."""
 
+            logger.info("🔄 Sending to GPT-4...")
+            
             response = client.chat.completions.create(
                 model="gpt-4-turbo-preview",
                 messages=[
@@ -217,7 +236,7 @@ Make quotes concise (under 280 characters for Twitter). Extract the most powerfu
                 
             except json.JSONDecodeError as je:
                 logger.error(f"Failed to parse JSON response: {je}")
-                logger.error(f"Response content: {content}")
+                logger.error(f"Response content: {content[:500]}")
                 return []
             
         except Exception as e:
