@@ -569,7 +569,7 @@
                         <label>Upload File</label>
                         <div class="file-upload" onclick="document.getElementById('autoFileInput').click()">
                             <p>📁 Click to upload file for automated processing</p>
-                            <input type="file" id="autoFileInput" name="file" accept="video/*,audio/*,.txt,.doc,.docx,.pdf">
+                            <input type="file" id="autoFileInput" name="file" accept="video/*,audio/*,.txt,.doc,.docx,.pdf" style="display:none;">
                         </div>
                     </div>
                     <button type="submit" class="btn btn-primary">🚀 Process & Extract Quotes</button>
@@ -872,7 +872,12 @@ Go to the Quotes tab to see them.
                     
                     // Reset form
                     form.reset();
-                    document.querySelector('.file-upload').innerHTML = '<p>📁 Click to upload file for automated processing</p><input type="file" id="autoFileInput" name="file" accept="video/*,audio/*,.txt,.doc,.docx,.pdf">';
+                    
+                    // Clear file display
+                    const fileDisplay = form.querySelector('.file-display');
+                    if (fileDisplay) {
+                        fileDisplay.remove();
+                    }
                     
                     // Refresh data
                     loadQuotes();
@@ -895,15 +900,22 @@ Go to the Quotes tab to see them.
                 fileInput.addEventListener('change', function(e) {
                     const fileName = e.target.files[0]?.name;
                     if (fileName) {
+                        // Update display WITHOUT removing the input
                         const uploadDiv = this.parentElement;
-                        uploadDiv.innerHTML = `<p>📄 Selected: ${fileName}</p>`;
-                        const newInput = document.createElement('input');
-                        newInput.type = 'file';
-                        newInput.id = 'autoFileInput';
-                        newInput.name = 'file';
-                        newInput.accept = 'video/*,audio/*,.txt,.doc,.docx,.pdf';
-                        newInput.style.display = 'none';
-                        uploadDiv.appendChild(newInput);
+                        
+                        // Remove old display text if exists
+                        const oldDisplay = uploadDiv.querySelector('.file-display');
+                        if (oldDisplay) {
+                            oldDisplay.remove();
+                        }
+                        
+                        // Add new display
+                        const displayText = document.createElement('p');
+                        displayText.className = 'file-display';
+                        displayText.textContent = `📄 Selected: ${fileName}`;
+                        displayText.style.color = 'var(--noi-gold)';
+                        displayText.style.marginTop = '10px';
+                        uploadDiv.appendChild(displayText);
                     }
                 });
             }
