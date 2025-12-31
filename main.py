@@ -50,12 +50,21 @@ def process_file_background(
     content_type: str,
     title: str,
     source: str,
-    num_quotes: int,
-    db_url: str
+    num_quotes: int
 ):
     """Background task for file processing with progress updates"""
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
+    
+    # Use DATABASE_URL from environment directly
+    db_url = os.getenv('DATABASE_URL')
+    if not db_url:
+        logger.error("DATABASE_URL not found in environment")
+        progress_tracker[task_id].update({
+            "status": "failed",
+            "message": "Database configuration error"
+        })
+        return
     
     # Create new DB session for background task
     engine = create_engine(db_url)
@@ -457,8 +466,7 @@ async def process_and_extract_quotes(
         content_type=content_type,
         title=title,
         source=source,
-        num_quotes=num_quotes,
-        db_url=str(db.get_bind().url)
+        num_quotes=num_quotes
     )
     
     # Return task_id immediately so frontend can start SSE
