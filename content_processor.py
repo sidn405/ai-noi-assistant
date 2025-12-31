@@ -152,7 +152,136 @@ class ContentProcessor:
             logger.error(traceback.format_exc())
             return []
     
+    def transcribe_audio_with_progress(self, file_path: str, task_id: str = None) -> Optional[str]:
+        """
+        Transcribe audio with progress updates for task tracking
+        """
+        try:
+            logger.info(f"🎤 Transcribing: {file_path}")
+            
+            # Check file exists and size
+            file_size = os.path.getsize(file_path)
+            if file_size == 0:
+                logger.error(f"❌ File is empty: {file_path}")
+                return None
+            
+            file_size_mb = file_size / 1024 / 1024
+            logger.info(f"📊 File size: {file_size_mb:.2f} MB")
+            
+            # Check if file needs to be split (25MB Whisper limit)
+            MAX_SIZE_MB = 24.5
+            
+            if file_size_mb > MAX_SIZE_MB:
+                logger.warning(f"⚠️ File is larger than {MAX_SIZE_MB}MB - splitting into chunks...")
+                
+                # Split the file
+                chunk_paths = self.split_audio_file(file_path, chunk_duration=600)
+                
+                if not chunk_paths:
+                    logger.error("❌ Failed to split file")
+                    return None
+                
+                # Transcribe each chunk with progress updates
+                transcripts = []
+                total_chunks = len(chunk_paths)
+                
+                for i, chunk_path in enumerate(chunk_paths, 1):
+                    logger.info(f"🎤 Transcribing chunk {i}/{total_chunks}...")
+                    
+                    # Update progress if task_id provided
+                    if task_id:
+                        from __main__ import progress_tracker
+                        progress = 30 + int((i / total_chunks) * 40)  # 30-70%
+                        progress_tracker[task_id].update({
+                            "progress": progress,
+                            "message": f"Transcribing chunk {i}/{total_chunks}...",
+                            "completed_steps": 2
+                        })
+                    
+                    chunk_size = os.path.getsize(chunk_path) / 1024 / 1024
+                    logger.info(f"📊 Chunk size: {chunk_size:.2f} MB")
+                    
+                    with open(chunk_path, 'rb') as audio_file:
+                        from openai import OpenAI
+                        client = OpenAI(
+                            api_key=self.openai_api_key,
+                            timeout=600.0,
+                            max_retries=2
+                        )
+                        
+                        transcript = client.audio.transcriptions.create(
+                            model="whisper-1",
+                            file=audio_file,
+                            response_format="text"
+                        )
+                        
+                        transcripts.append(transcript)
+                        logger.info(f"✅ Chunk {i} transcribed: {len(transcript)} characters")
+                
+                # Combine all transcripts
+                full_transcript = " ".join(transcripts)
+                logger.info(f"✅ All chunks transcribed! Total: {len(full_transcript)} characters")
+                
+                # Update progress
+                if task_id:
+                    from __main__ import progress_tracker
+                    progress_tracker[task_id].update({
+                        "progress": 70,
+                        "message": f"Transcription complete: {len(full_transcript)} characters",
+                        "completed_steps": 3,
+                        "current_step": "extract"
+                    })
+                
+                # Clean up chunk files
+                for chunk_path in chunk_paths:
+                    try:
+                        os.remove(chunk_path)
+                    except:
+                        pass
+                
+                return full_transcript
+            
+            else:
+                # File is small enough - transcribe directly
+                with open(file_path, 'rb') as audio_file:
+                    from openai import OpenAI
+                    client = OpenAI(
+                        api_key=self.openai_api_key,
+                        timeout=600.0,
+                        max_retries=2
+                    )
+                    
+                    logger.info("🔄 Sending to Whisper API...")
+                    
+                    transcript = client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=audio_file,
+                        response_format="text"
+                    )
+                
+                logger.info(f"✅ Transcription complete: {len(transcript)} characters")
+                
+                # Update progress
+                if task_id:
+                    from __main__ import progress_tracker
+                    progress_tracker[task_id].update({
+                        "progress": 60,
+                        "message": f"Transcription complete: {len(transcript)} characters",
+                        "completed_steps": 3,
+                        "current_step": "extract"
+                    })
+                
+                return transcript
+            
+        except Exception as e:
+            logger.error(f"❌ Transcription failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
+    
     def transcribe_audio(self, file_path: str) -> Optional[str]:
+        """Wrapper for backward compatibility"""
+        return self.transcribe_audio_with_progress(file_path, task_id=None)
         """
         Transcribe audio/video file using OpenAI Whisper
         Automatically splits large files (>25MB) into chunks
@@ -297,9 +426,19 @@ class ContentProcessor:
             
             prompt = f"""Extract EXACTLY {num_quotes} powerful, meaningful quotes from this Nation of Islam content.
 
-CRITICAL: You MUST extract exactly {num_quotes} quotes. Not 10. Not 5. Exactly {num_quotes}.
+CRITICAL INSTRUCTIONS:
+1. You MUST extract exactly {num_quotes} quotes. Not 10. Not 5. Exactly {num_quotes}.
+2. When the speaker is quoting from the Quran or Bible, attribute to "The Holy Quran" or "The Holy Bible", NOT to the speaker.
+3. Only attribute to the speaker if they are speaking their own words, not quoting scripture.
 
-Focus on:
+SCRIPTURE DETECTION:
+- Look for phrases like: "The Quran says...", "In the Bible...", "Scripture tells us...", "It is written...", "Allah says in the Quran...", "The Prophet (PBUH) said..."
+- Quranic verses or Islamic teachings → Author: "The Holy Quran"
+- Biblical verses or references → Author: "The Holy Bible"  
+- Hadith or Prophet's sayings → Author: "Prophet Muhammad (PBUH)"
+- Speaker's own words/teachings → Author: "{source or 'Speaker'}"
+
+Focus on extracting quotes about:
 - Wisdom and knowledge
 - Empowerment and self-improvement
 - Unity and community
@@ -318,11 +457,16 @@ Format:
 [
   {{
     "quote_text": "powerful quote here",
-    "author": "{source or 'Unknown'}",
+    "author": "The Holy Quran|The Holy Bible|Prophet Muhammad (PBUH)|{source or 'Speaker'}",
     "category": "wisdom|faith|unity|empowerment|knowledge|justice"
   }},
   ... ({num_quotes} total quotes)
 ]
+
+EXAMPLES:
+- If speaker says "The Quran teaches us that..." → Author: "The Holy Quran"
+- If speaker says "I believe that we must..." → Author: "{source or 'Speaker'}"
+- If speaker says "As it says in the Bible..." → Author: "The Holy Bible"
 
 DO NOT include any markdown formatting, code blocks, or explanations.
 ONLY return the raw JSON array with {num_quotes} quotes."""
@@ -334,7 +478,7 @@ ONLY return the raw JSON array with {num_quotes} quotes."""
                 messages=[
                     {
                         "role": "system",
-                        "content": f"You are an expert at extracting powerful quotes from religious and educational content. You MUST return EXACTLY {num_quotes} quotes in valid JSON format. No more, no less."
+                        "content": f"You are an expert at extracting powerful quotes from religious and educational content. You MUST return EXACTLY {num_quotes} quotes in valid JSON format. CRITICAL: When the speaker quotes from the Quran, Bible, or Hadith, attribute the quote to the actual source (The Holy Quran, The Holy Bible, Prophet Muhammad PBUH), NOT to the speaker. Only attribute to the speaker when they are expressing their own thoughts."
                     },
                     {
                         "role": "user",
@@ -433,7 +577,8 @@ ONLY return the raw JSON array with {num_quotes} quotes."""
         file_type: str,
         source: str = None,
         num_quotes: int = 10,
-        upload_to_s3: bool = True
+        upload_to_s3: bool = True,
+        task_id: str = None
     ) -> Dict:
         """
         Complete pipeline: Process a file and extract quotes
@@ -474,8 +619,8 @@ ONLY return the raw JSON array with {num_quotes} quotes."""
             text_content = None
             
             if file_type in ['video', 'audio']:
-                # Transcribe audio/video
-                text_content = self.transcribe_audio(file_path)
+                # Transcribe audio/video with progress tracking
+                text_content = self.transcribe_audio_with_progress(file_path, task_id=task_id)
                 result['transcription'] = text_content
             
             elif file_type == 'text':

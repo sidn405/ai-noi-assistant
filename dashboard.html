@@ -875,7 +875,14 @@
             const totalStepsEl = document.getElementById('totalSteps');
             const stepNameEl = document.getElementById('stepName');
             
+            // Reset progress
+            progressBar.style.width = '0%';
+            progressBar.textContent = '';
+            progressPercent.textContent = '0%';
+            progressMessage.textContent = 'Uploading...';
+            
             try {
+                // Start upload
                 const response = await fetch('/api/content/process-and-extract', {
                     method: 'POST',
                     body: formData
@@ -884,11 +891,13 @@
                 const result = await response.json();
                 
                 if (result.success && result.task_id) {
-                    // Connect to SSE for real-time progress
+                    // Connect to SSE for real-time progress IMMEDIATELY
                     const eventSource = new EventSource(`/api/progress/${result.task_id}`);
                     
                     eventSource.onmessage = function(e) {
                         const progress = JSON.parse(e.data);
+                        
+                        console.log('Progress update:', progress);
                         
                         // Update progress bar
                         progressBar.style.width = progress.progress + '%';
@@ -905,34 +914,72 @@
                         if (progress.status === 'complete') {
                             eventSource.close();
                             
-                            // Play success sound
-                            const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBSuBzvLZiTUHGGS57OmjTQ0PVK3n8LllHAU2jdXzzn0pBSh+zPLaizsIFGO57+yhUBELTKXh8bllHQU3kdry0YU2Bhljuevqo04LDlGn4/G4Zx4FNpLX8s+AKwYnfcnw2Yo8BxRhuOzroVERC0ul4fG5Zx4ENI/Y8tKDNQYZY7nr66NODQ9Sp+Xxu2kfBTaP1/PQgiwGKH7M8tuKOwcUY7jt66FRDwpJounwtGMbBjiP2fPSgjkGF2G46eurTwwOUank8rtpIAU2kdfy0YM0Bxhju+zpo04PClCl4/K8aiAFN5HX89GCNAcYY7vt6qNNDQ5QpuXyu2ogBTiS2PPRgjQHGWS67emhUQ8LTqXj8bxqHwU3ktf00YI1CBhjuuvqpE4PC06l4/C9aiAFN5PY89GCNQgXY7rrq6RODwtOpeP1v2wiBTiT2PTSgzYIGWS76uqjTg0OT6bj87xqIAU4lNf00YM2Bxhju+vpp04NDlCm5fO8ayEFN5LY9NGEN...'); // Success chime
-                            audio.play().catch(e => console.log('Audio play failed:', e));
+                            // Play success sound - simple beep
+                            try {
+                                // Create audio context for success sound
+                                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                                const oscillator = audioContext.createOscillator();
+                                const gainNode = audioContext.createGain();
+                                
+                                oscillator.connect(gainNode);
+                                gainNode.connect(audioContext.destination);
+                                
+                                // Success chime: two tones
+                                oscillator.frequency.value = 800;
+                                oscillator.type = 'sine';
+                                gainNode.gain.value = 0.3;
+                                
+                                oscillator.start(audioContext.currentTime);
+                                oscillator.stop(audioContext.currentTime + 0.1);
+                                
+                                // Second tone
+                                const osc2 = audioContext.createOscillator();
+                                const gain2 = audioContext.createGain();
+                                osc2.connect(gain2);
+                                gain2.connect(audioContext.destination);
+                                osc2.frequency.value = 1000;
+                                osc2.type = 'sine';
+                                gain2.gain.value = 0.3;
+                                osc2.start(audioContext.currentTime + 0.15);
+                                osc2.stop(audioContext.currentTime + 0.35);
+                                
+                                console.log('✅ Success sound played');
+                            } catch (e) {
+                                console.log('Could not play sound:', e);
+                            }
+                            
+                            // Show browser notification if permitted
+                            if ('Notification' in window && Notification.permission === 'granted') {
+                                new Notification('Processing Complete!', {
+                                    body: `Extracted ${progress.quotes_count} quotes successfully!`,
+                                    icon: '🎉'
+                                });
+                            }
                             
                             // Show success message
-                            alert(`
+                            setTimeout(() => {
+                                alert(`
 🎉 Processing Complete!
 
 📝 Title: ${formData.get('title')}
-💭 Quotes Extracted: ${progress.quotes_count || result.quotes_extracted}
-📄 Transcription: ${result.transcription_length} characters
-${result.s3_url ? '☁️ Uploaded to S3: Yes' : '💾 Stored locally'}
+💭 Quotes Extracted: ${progress.quotes_count}
 
 ✅ All quotes have been added to your Quote Library!
 Go to the Quotes tab to see them.
-                            `);
-                            
-                            // Reset form
-                            form.reset();
-                            progressContainer.style.display = 'none';
-                            const fileDisplay = form.querySelector('.file-display');
-                            if (fileDisplay) {
-                                fileDisplay.remove();
-                            }
-                            
-                            // Refresh data
-                            loadQuotes();
-                            loadAnalytics();
+                                `);
+                                
+                                // Reset form
+                                form.reset();
+                                progressContainer.style.display = 'none';
+                                const fileDisplay = form.querySelector('.file-display');
+                                if (fileDisplay) {
+                                    fileDisplay.remove();
+                                }
+                                
+                                // Refresh data
+                                loadQuotes();
+                                loadAnalytics();
+                            }, 500);
                         } else if (progress.status === 'failed') {
                             eventSource.close();
                             alert('❌ Processing failed: ' + progress.message);
@@ -940,23 +987,29 @@ Go to the Quotes tab to see them.
                         }
                     };
                     
-                    eventSource.onerror = function() {
+                    eventSource.onerror = function(err) {
+                        console.error('SSE Error:', err);
                         eventSource.close();
-                        // Still check if we got results
-                        if (result.success) {
-                            alert(`
-🎉 Processing Complete!
-
-📝 Title: ${formData.get('title')}
-💭 Quotes Extracted: ${result.quotes_extracted}
-
-✅ Check the Quotes tab!
-                            `);
-                            form.reset();
-                            loadQuotes();
-                            loadAnalytics();
-                        }
-                        progressContainer.style.display = 'none';
+                        // Check final status
+                        setTimeout(() => {
+                            fetch(`/api/progress/${result.task_id}`)
+                                .then(r => r.text())
+                                .then(text => {
+                                    const lines = text.split('\n');
+                                    const lastData = lines.filter(l => l.startsWith('data:')).pop();
+                                    if (lastData) {
+                                        const progress = JSON.parse(lastData.substring(6));
+                                        if (progress.status === 'complete') {
+                                            alert(`Processing complete! Extracted ${progress.quotes_count} quotes.`);
+                                            form.reset();
+                                            loadQuotes();
+                                            loadAnalytics();
+                                        }
+                                    }
+                                })
+                                .catch(e => console.error(e));
+                            progressContainer.style.display = 'none';
+                        }, 2000);
                     };
                     
                 } else {
@@ -964,6 +1017,7 @@ Go to the Quotes tab to see them.
                     progressContainer.style.display = 'none';
                 }
             } catch (error) {
+                console.error('Error:', error);
                 alert('❌ Error: ' + error.message);
                 progressContainer.style.display = 'none';
             } finally {
@@ -971,6 +1025,13 @@ Go to the Quotes tab to see them.
                 submitBtn.disabled = false;
             }
         }
+        
+        // Request notification permission on load
+        document.addEventListener('DOMContentLoaded', function() {
+            if ('Notification' in window && Notification.permission === 'default') {
+                Notification.requestPermission();
+            }
+        });
         
         // Update file input display for auto-processing
         document.addEventListener('DOMContentLoaded', function() {

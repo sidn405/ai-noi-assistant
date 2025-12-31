@@ -2,7 +2,7 @@
 NOI Social Media Command Center
 A legitimate social media management and discovery platform
 """
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,6 +31,7 @@ load_dotenv()
 import asyncio
 from collections import defaultdict
 from typing import AsyncGenerator
+import time
 
 # Global progress tracker
 progress_tracker = defaultdict(lambda: {
@@ -41,6 +42,118 @@ progress_tracker = defaultdict(lambda: {
     "total_steps": 0,
     "completed_steps": 0
 })
+
+
+def process_file_background(
+    task_id: str,
+    file_path: str,
+    content_type: str,
+    title: str,
+    source: str,
+    num_quotes: int,
+    db_url: str
+):
+    """Background task for file processing with progress updates"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    
+    # Create new DB session for background task
+    engine = create_engine(db_url)
+    SessionLocal = sessionmaker(bind=engine)
+    db = SessionLocal()
+    
+    try:
+        # Update: Starting processing
+        progress_tracker[task_id].update({
+            "status": "processing",
+            "progress": 25,
+            "message": "Starting transcription...",
+            "current_step": "transcribe",
+            "completed_steps": 1,
+            "total_steps": 5
+        })
+        
+        time.sleep(0.5)  # Give frontend time to connect
+        
+        # Process the file
+        result = content_processor.process_file(
+            file_path=file_path,
+            file_type=content_type,
+            source=source,
+            num_quotes=num_quotes,
+            upload_to_s3=True,
+            task_id=task_id  # Pass task_id for progress updates
+        )
+        
+        if not result['success']:
+            progress_tracker[task_id].update({
+                "status": "failed",
+                "progress": 0,
+                "message": result['error']
+            })
+            db.close()
+            return
+        
+        # Update: Saving to database
+        progress_tracker[task_id].update({
+            "progress": 85,
+            "message": f"Extracted {len(result['quotes'])} quotes, saving to database...",
+            "completed_steps": 4,
+            "current_step": "saving"
+        })
+        
+        # Save content to DB
+        db_content = Content(
+            title=title,
+            content_type=content_type,
+            file_path=result.get('s3_url') or file_path,
+            transcription=result['transcription'],
+            extracted_quotes=result['quotes'],
+            source=source
+        )
+        db.add(db_content)
+        db.commit()
+        db.refresh(db_content)
+        
+        # Save quotes to DB
+        saved_quotes = []
+        for quote_data in result['quotes']:
+            quote = Quote(
+                quote_text=quote_data['quote_text'],
+                author=quote_data.get('author', source or 'Unknown'),
+                category=quote_data.get('category', 'wisdom'),
+                content_id=db_content.id,
+                ai_generated=True
+            )
+            db.add(quote)
+            saved_quotes.append(quote)
+        
+        db.commit()
+        
+        logger.info(f"✅ Successfully processed {title}: {len(saved_quotes)} quotes extracted")
+        
+        # Mark as complete
+        progress_tracker[task_id].update({
+            "status": "complete",
+            "progress": 100,
+            "message": f"✅ Complete! Extracted {len(saved_quotes)} quotes",
+            "completed_steps": 5,
+            "current_step": "done",
+            "quotes_count": len(saved_quotes),
+            "content_id": db_content.id
+        })
+        
+    except Exception as e:
+        logger.error(f"Background processing failed: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        progress_tracker[task_id].update({
+            "status": "failed",
+            "progress": 0,
+            "message": str(e)
+        })
+    finally:
+        db.close()
 
 # Initialize FastAPI
 app = FastAPI(title="NOI Social Command Center")
@@ -266,6 +379,7 @@ async def upload_content(
 
 @app.post("/api/content/process-and-extract")
 async def process_and_extract_quotes(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     title: str = Form(...),
     content_type: str = Form(...),
@@ -275,22 +389,11 @@ async def process_and_extract_quotes(
 ):
     """
     AUTOMATED PIPELINE: Upload file → Transcribe → Extract quotes → Save all to DB
-    This is the all-in-one endpoint you need!
+    Returns task_id immediately for progress tracking
     """
     
     # Generate task ID for progress tracking
     task_id = str(uuid.uuid4())
-    
-    # Initialize progress
-    progress_tracker[task_id] = {
-        "status": "uploading",
-        "progress": 0,
-        "message": "Uploading file...",
-        "current_step": "upload",
-        "total_steps": 5,
-        "completed_steps": 0,
-        "task_id": task_id
-    }
     
     # Create upload directory
     upload_dir = Path("uploads")
@@ -303,9 +406,7 @@ async def process_and_extract_quotes(
     # Get file extension safely
     if '.' in original_filename:
         file_ext = original_filename.rsplit('.', 1)[-1].lower()
-        # Validate extension is reasonable
         if not file_ext or len(file_ext) > 10 or not file_ext.isalnum():
-            # Invalid extension, use content_type to guess
             if content_type == 'audio':
                 file_ext = 'mp3'
             elif content_type == 'video':
@@ -313,7 +414,6 @@ async def process_and_extract_quotes(
             else:
                 file_ext = 'txt'
     else:
-        # No extension - use content_type
         if content_type == 'audio':
             file_ext = 'mp3'
         elif content_type == 'video':
@@ -336,109 +436,38 @@ async def process_and_extract_quotes(
     logger.info(f"📊 File saved: {file_size:,} bytes")
     
     if file_size == 0:
-        progress_tracker[task_id]["status"] = "failed"
-        progress_tracker[task_id]["message"] = "File is empty"
         raise HTTPException(status_code=400, detail="Uploaded file is empty or upload failed")
     
-    # Update progress
-    progress_tracker[task_id].update({
-        "progress": 20,
+    # Initialize progress
+    progress_tracker[task_id] = {
+        "status": "uploaded",
+        "progress": 10,
         "message": f"File uploaded: {file_size / 1024 / 1024:.1f} MB",
+        "current_step": "upload",
+        "total_steps": 5,
         "completed_steps": 1,
-        "current_step": "processing"
-    })
+        "task_id": task_id
+    }
     
-    # AUTOMATED PROCESSING with progress tracking
-    try:
-        # Update progress
-        progress_tracker[task_id].update({
-            "progress": 30,
-            "message": "Starting transcription...",
-            "current_step": "transcribe"
-        })
-        
-        result = content_processor.process_file(
-            file_path=str(file_path),
-            file_type=content_type,
-            source=source,
-            num_quotes=num_quotes,
-            upload_to_s3=True  # Upload to S3 if configured
-        )
-        
-        if not result['success']:
-            # Log the error but still try to save what we can
-            logger.error(f"Processing error: {result['error']}")
-            progress_tracker[task_id]["status"] = "failed"
-            progress_tracker[task_id]["message"] = result['error']
-            raise HTTPException(status_code=500, detail=result['error'])
-        
-        # Update progress
-        progress_tracker[task_id].update({
-            "progress": 80,
-            "message": f"Extracted {len(result['quotes'])} quotes, saving...",
-            "completed_steps": 3,
-            "current_step": "saving"
-        })
-        
-        # Save content to DB
-        db_content = Content(
-            title=title,
-            content_type=content_type,
-            file_path=result.get('s3_url') or str(file_path),  # Use S3 URL if available, otherwise local
-            transcription=result['transcription'],
-            extracted_quotes=result['quotes'],
-            source=source
-        )
-        db.add(db_content)
-        db.commit()
-        db.refresh(db_content)
-        
-        # Save quotes to DB
-        saved_quotes = []
-        for quote_data in result['quotes']:
-            quote = Quote(
-                quote_text=quote_data['quote_text'],
-                author=quote_data.get('author', source or 'Unknown'),
-                category=quote_data.get('category', 'wisdom'),
-                content_id=db_content.id,
-                ai_generated=True
-            )
-            db.add(quote)
-            saved_quotes.append(quote)
-        
-        db.commit()
-        
-        logger.info(f"✅ Successfully processed {title}: {len(saved_quotes)} quotes extracted")
-        
-        # Mark as complete
-        progress_tracker[task_id].update({
-            "status": "complete",
-            "progress": 100,
-            "message": f"✅ Complete! Extracted {len(saved_quotes)} quotes",
-            "completed_steps": 5,
-            "current_step": "done",
-            "quotes_count": len(saved_quotes)
-        })
-        
-        return {
-            "success": True,
-            "task_id": task_id,
-            "content_id": db_content.id,
-            "transcription_length": len(result['transcription']) if result['transcription'] else 0,
-            "quotes_extracted": len(saved_quotes),
-            "quotes": result['quotes'],
-            "s3_url": result.get('s3_url'),
-            "storage": "AWS S3" if result.get('s3_url') else "Local",
-            "message": f"✅ Processed {title}: extracted {len(saved_quotes)} quotes"
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Processing failed: {str(e)}")
-        progress_tracker[task_id]["status"] = "failed"
-        progress_tracker[task_id]["message"] = str(e)
-        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+    # Start background processing
+    background_tasks.add_task(
+        process_file_background,
+        task_id=task_id,
+        file_path=str(file_path),
+        content_type=content_type,
+        title=title,
+        source=source,
+        num_quotes=num_quotes,
+        db_url=str(db.get_bind().url)
+    )
+    
+    # Return task_id immediately so frontend can start SSE
+    return {
+        "success": True,
+        "task_id": task_id,
+        "message": "Processing started",
+        "file_size": file_size
+    }
 
 
 @app.post("/api/content/batch-process")
