@@ -91,9 +91,71 @@ class ContentProcessor:
             logger.error(f"❌ S3 download failed: {e}")
             return False
     
+    def split_audio_file(self, file_path: str, chunk_duration: int = 600) -> List[str]:
+        """
+        Split large audio file into smaller chunks
+        
+        Args:
+            file_path: Path to audio file
+            chunk_duration: Duration of each chunk in seconds (default: 10 minutes)
+            
+        Returns:
+            List of chunk file paths
+        """
+        try:
+            logger.info(f"✂️ Splitting audio file into {chunk_duration}s chunks...")
+            
+            # Use pydub for audio splitting
+            try:
+                from pydub import AudioSegment
+            except ImportError:
+                logger.error("pydub not installed. Install with: pip install pydub")
+                return []
+            
+            # Load audio file
+            audio = AudioSegment.from_file(file_path)
+            
+            # Calculate number of chunks
+            duration_ms = len(audio)
+            chunk_duration_ms = chunk_duration * 1000
+            num_chunks = (duration_ms // chunk_duration_ms) + 1
+            
+            logger.info(f"📊 Total duration: {duration_ms / 1000 / 60:.1f} minutes")
+            logger.info(f"📦 Splitting into {num_chunks} chunks of {chunk_duration / 60:.0f} minutes each")
+            
+            # Create chunks directory
+            chunks_dir = Path(file_path).parent / "chunks"
+            chunks_dir.mkdir(exist_ok=True)
+            
+            # Split into chunks
+            chunk_paths = []
+            for i in range(num_chunks):
+                start_ms = i * chunk_duration_ms
+                end_ms = min((i + 1) * chunk_duration_ms, duration_ms)
+                
+                chunk = audio[start_ms:end_ms]
+                chunk_filename = f"{Path(file_path).stem}_chunk_{i+1}.mp3"
+                chunk_path = chunks_dir / chunk_filename
+                
+                # Export chunk
+                chunk.export(str(chunk_path), format="mp3", bitrate="64k")
+                chunk_paths.append(str(chunk_path))
+                
+                chunk_size = os.path.getsize(chunk_path) / 1024 / 1024
+                logger.info(f"✅ Created chunk {i+1}/{num_chunks}: {chunk_size:.2f} MB")
+            
+            return chunk_paths
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to split audio: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return []
+    
     def transcribe_audio(self, file_path: str) -> Optional[str]:
         """
         Transcribe audio/video file using OpenAI Whisper
+        Automatically splits large files (>25MB) into chunks
         
         Args:
             file_path: Path to audio/video file
@@ -110,32 +172,80 @@ class ContentProcessor:
                 logger.error(f"❌ File is empty: {file_path}")
                 return None
             
-            logger.info(f"📊 File size: {file_size / 1024 / 1024:.2f} MB")
+            file_size_mb = file_size / 1024 / 1024
+            logger.info(f"📊 File size: {file_size_mb:.2f} MB")
             
-            # Check if file is too large for Whisper (25MB limit)
-            if file_size > 25 * 1024 * 1024:
-                logger.warning(f"⚠️ File is larger than 25MB, may need to be split or compressed")
+            # Check if file needs to be split (25MB Whisper limit)
+            MAX_SIZE_MB = 24.5  # Use 24.5 to be safe
             
-            # Use OpenAI Whisper API
-            with open(file_path, 'rb') as audio_file:
-                # Initialize client with minimal config
-                from openai import OpenAI
-                client = OpenAI(
-                    api_key=self.openai_api_key,
-                    timeout=600.0,  # 10 minute timeout for large files
-                    max_retries=2
-                )
+            if file_size_mb > MAX_SIZE_MB:
+                logger.warning(f"⚠️ File is larger than {MAX_SIZE_MB}MB - splitting into chunks...")
                 
-                logger.info("🔄 Sending to Whisper API...")
+                # Split the file
+                chunk_paths = self.split_audio_file(file_path, chunk_duration=600)  # 10-minute chunks
                 
-                transcript = client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=audio_file,
-                    response_format="text"
-                )
+                if not chunk_paths:
+                    logger.error("❌ Failed to split file")
+                    return None
+                
+                # Transcribe each chunk
+                transcripts = []
+                for i, chunk_path in enumerate(chunk_paths, 1):
+                    logger.info(f"🎤 Transcribing chunk {i}/{len(chunk_paths)}...")
+                    
+                    chunk_size = os.path.getsize(chunk_path) / 1024 / 1024
+                    logger.info(f"📊 Chunk size: {chunk_size:.2f} MB")
+                    
+                    with open(chunk_path, 'rb') as audio_file:
+                        from openai import OpenAI
+                        client = OpenAI(
+                            api_key=self.openai_api_key,
+                            timeout=600.0,
+                            max_retries=2
+                        )
+                        
+                        transcript = client.audio.transcriptions.create(
+                            model="whisper-1",
+                            file=audio_file,
+                            response_format="text"
+                        )
+                        
+                        transcripts.append(transcript)
+                        logger.info(f"✅ Chunk {i} transcribed: {len(transcript)} characters")
+                
+                # Combine all transcripts
+                full_transcript = " ".join(transcripts)
+                logger.info(f"✅ All chunks transcribed! Total: {len(full_transcript)} characters")
+                
+                # Clean up chunk files
+                for chunk_path in chunk_paths:
+                    try:
+                        os.remove(chunk_path)
+                    except:
+                        pass
+                
+                return full_transcript
             
-            logger.info(f"✅ Transcription complete: {len(transcript)} characters")
-            return transcript
+            else:
+                # File is small enough - transcribe directly
+                with open(file_path, 'rb') as audio_file:
+                    from openai import OpenAI
+                    client = OpenAI(
+                        api_key=self.openai_api_key,
+                        timeout=600.0,
+                        max_retries=2
+                    )
+                    
+                    logger.info("🔄 Sending to Whisper API...")
+                    
+                    transcript = client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=audio_file,
+                        response_format="text"
+                    )
+                
+                logger.info(f"✅ Transcription complete: {len(transcript)} characters")
+                return transcript
             
         except Exception as e:
             logger.error(f"❌ Transcription failed: {e}")
