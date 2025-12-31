@@ -239,15 +239,47 @@ async def process_and_extract_quotes(
     upload_dir = Path("uploads")
     upload_dir.mkdir(exist_ok=True)
     
-    # Generate unique filename
-    file_ext = file.filename.split('.')[-1]
+    # Generate unique filename with robust extension handling
+    original_filename = file.filename or "uploaded_file"
+    logger.info(f"📤 Processing upload: {original_filename}")
+    
+    # Get file extension safely
+    if '.' in original_filename:
+        file_ext = original_filename.rsplit('.', 1)[-1].lower()
+        # Validate extension is reasonable
+        if not file_ext or len(file_ext) > 10 or not file_ext.isalnum():
+            # Invalid extension, use content_type to guess
+            if content_type == 'audio':
+                file_ext = 'mp3'
+            elif content_type == 'video':
+                file_ext = 'mp4'
+            else:
+                file_ext = 'txt'
+    else:
+        # No extension - use content_type
+        if content_type == 'audio':
+            file_ext = 'mp3'
+        elif content_type == 'video':
+            file_ext = 'mp4'
+        else:
+            file_ext = 'txt'
+    
     unique_filename = f"{uuid.uuid4()}.{file_ext}"
     file_path = upload_dir / unique_filename
     
+    logger.info(f"📁 Saving as: {unique_filename}")
+    
     # Save file
+    file_content = await file.read()
     with open(file_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
+        f.write(file_content)
+    
+    # Verify file was written successfully
+    file_size = os.path.getsize(file_path)
+    logger.info(f"📊 File saved: {file_size:,} bytes")
+    
+    if file_size == 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty or upload failed")
     
     # AUTOMATED PROCESSING
     try:
