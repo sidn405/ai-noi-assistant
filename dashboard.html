@@ -713,16 +713,55 @@
             <div class="card">
                 <h2 class="card-title">🔍 Community Finder</h2>
                 <p style="color: var(--text-secondary); margin-bottom: 20px;">
-                    Discover and engage with NOI supporters on Twitter automatically!
+                    Discover and engage with NOI supporters on Twitter!
                 </p>
                 
-                <!-- Search Button -->
-                <button onclick="searchNOITweets()" class="btn btn-primary" id="searchBtn">
-                    🔎 Search for New NOI Tweets
-                </button>
+                <!-- Method 1: Manual Add (Current) -->
+                <div style="background: rgba(212, 175, 55, 0.1); border: 2px solid var(--noi-gold); border-radius: 8px; padding: 20px; margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <h3 style="margin: 0; color: var(--noi-gold);">Method 1: ➕ Manual Addition</h3>
+                        <span class="status-badge" style="background: var(--success-color); color: white;">✓ Active</span>
+                    </div>
+                    <p style="color: var(--text-secondary); margin-bottom: 15px; font-size: 0.95em;">
+                        Search Twitter manually, then paste tweet URLs here. Works with Free API tier!
+                    </p>
+                    <form id="manualTweetForm" onsubmit="addTweetManually(event)" style="display: flex; gap: 10px; align-items: flex-start;">
+                        <input 
+                            type="url" 
+                            id="tweetUrl"
+                            placeholder="https://twitter.com/username/status/123456789" 
+                            required
+                            style="flex: 1; padding: 10px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-dark); color: var(--text-color);">
+                        <button type="submit" class="btn btn-primary">Add Tweet</button>
+                    </form>
+                    <p style="margin: 10px 0 0 0; font-size: 0.85em; color: var(--text-secondary);">
+                        💡 <strong>How:</strong> Search Twitter for <code>#NOI</code>, <code>"Nation of Islam"</code>, or <code>"Minister Farrakhan"</code>, then copy tweet URLs
+                    </p>
+                </div>
+                
+                <!-- Method 2: Automated Search (Requires Upgrade) -->
+                <div style="border: 2px solid var(--border-color); border-radius: 8px; padding: 20px; margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <h3 style="margin: 0;">Method 2: 🤖 Automated Search</h3>
+                        <span class="status-badge" style="background: rgba(128, 128, 128, 0.3); color: var(--text-secondary);">⚠ Requires Upgrade</span>
+                    </div>
+                    <p style="color: var(--text-secondary); margin-bottom: 15px; font-size: 0.95em;">
+                        One-click to automatically discover NOI tweets. Requires Twitter API Basic tier ($100/month).
+                    </p>
+                    <button 
+                        onclick="searchNOITweets()" 
+                        class="btn btn-secondary" 
+                        id="searchBtn" 
+                        style="width: 100%;">
+                        🔎 Search for New NOI Tweets
+                    </button>
+                    <p style="margin: 10px 0 0 0; font-size: 0.85em; color: var(--text-secondary);">
+                        💡 <strong>To enable:</strong> Upgrade at <a href="https://developer.twitter.com/en/portal/products" target="_blank" style="color: var(--noi-gold);">Twitter Developer Portal</a>, then this button will work automatically!
+                    </p>
+                </div>
                 
                 <!-- Stats -->
-                <div id="communityStats" style="margin-top: 20px; padding: 15px; background: var(--bg-dark); border-radius: 8px;">
+                <div id="communityStats" style="padding: 15px; background: var(--bg-dark); border-radius: 8px;">
                     <p style="margin: 0; color: var(--text-secondary);">Loading stats...</p>
                 </div>
             </div>
@@ -1337,6 +1376,37 @@ Go to the Quotes tab to see them.
         }
 
         // ==================== COMMUNITY FINDER ====================
+        
+        // Add tweet manually
+        async function addTweetManually(event) {
+            event.preventDefault();
+            const form = event.target;
+            const formData = new FormData(form);
+            const tweetUrl = document.getElementById('tweetUrl').value;
+            
+            formData.append('tweet_url', tweetUrl);
+            
+            try {
+                const response = await fetch('/api/community/add-manual', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert(`✅ ${result.message}\n\nClick "New Tweets" to see it!`);
+                    form.reset();
+                    loadCommunityStats();
+                    loadCommunityTweets(false);
+                } else {
+                    alert('❌ ' + (result.detail || 'Failed to add tweet'));
+                }
+            } catch (error) {
+                console.error('Failed to add tweet:', error);
+                alert('❌ Failed to add tweet: ' + error.message);
+            }
+        }
         
         // Search for NOI tweets
         async function searchNOITweets() {

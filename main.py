@@ -967,6 +967,98 @@ async def get_analytics_overview(db: Session = Depends(get_db)):
 
 # ==================== COMMUNITY FINDER ====================
 
+@app.post("/api/community/add-manual")
+async def add_tweet_manually(
+    tweet_url: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Manually add a tweet to community finder
+    For users without elevated Twitter API access
+    """
+    import re
+    
+    # Extract tweet ID from URL
+    # Formats: twitter.com/username/status/123456 or x.com/username/status/123456
+    match = re.search(r'/status/(\d+)', tweet_url)
+    if not match:
+        raise HTTPException(status_code=400, detail="Invalid Twitter URL. Must be in format: https://twitter.com/username/status/123456")
+    
+    tweet_id = match.group(1)
+    
+    # Check if already exists
+    existing = db.query(CommunityTweet).filter(
+        CommunityTweet.tweet_id == tweet_id
+    ).first()
+    
+    if existing:
+        raise HTTPException(status_code=400, detail="This tweet is already in your community list!")
+    
+    # Try to fetch tweet details with Twitter API
+    try:
+        import tweepy
+        
+        api_key = os.getenv("TWITTER_API_KEY")
+        api_secret = os.getenv("TWITTER_API_SECRET")
+        access_token = os.getenv("TWITTER_ACCESS_TOKEN")
+        access_secret = os.getenv("TWITTER_ACCESS_SECRET")
+        
+        client = tweepy.Client(
+            consumer_key=api_key,
+            consumer_secret=api_secret,
+            access_token=access_token,
+            access_token_secret=access_secret
+        )
+        
+        # Fetch tweet details
+        tweet = client.get_tweet(
+            id=tweet_id,
+            tweet_fields=['created_at', 'public_metrics', 'author_id'],
+            expansions=['author_id'],
+            user_fields=['username', 'name']
+        )
+        
+        if not tweet.data:
+            raise HTTPException(status_code=404, detail="Tweet not found or is private")
+        
+        # Get author info
+        author = tweet.includes['users'][0] if tweet.includes and 'users' in tweet.includes else None
+        if not author:
+            raise HTTPException(status_code=404, detail="Could not fetch author information")
+        
+        # Save to database
+        community_tweet = CommunityTweet(
+            tweet_id=tweet_id,
+            author_username=author.username,
+            author_name=author.name,
+            author_id=str(tweet.data.author_id),
+            tweet_text=tweet.data.text,
+            tweet_url=tweet_url,
+            created_at_twitter=tweet.data.created_at,
+            like_count=tweet.data.public_metrics.get('like_count', 0),
+            retweet_count=tweet.data.public_metrics.get('retweet_count', 0),
+            reply_count=tweet.data.public_metrics.get('reply_count', 0),
+            search_query="manual_add",
+            sentiment="positive"
+        )
+        
+        db.add(community_tweet)
+        db.commit()
+        
+        logger.info(f"✅ Manually added tweet from @{author.username}")
+        
+        return {
+            "success": True,
+            "message": f"Added tweet from @{author.username}!"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to add tweet: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to add tweet: {str(e)}")
+
+
 @app.post("/api/community/search")
 async def search_noi_tweets(db: Session = Depends(get_db)):
     """Search Twitter for NOI-related content"""
@@ -982,12 +1074,13 @@ async def search_noi_tweets(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Twitter API credentials not configured")
     
     try:
-        # Initialize Twitter client
+        # Try v2 API first (requires Basic/Pro tier - $100/month)
         client = tweepy.Client(
             consumer_key=api_key,
             consumer_secret=api_secret,
             access_token=access_token,
-            access_token_secret=access_secret
+            access_token_secret=access_secret,
+            wait_on_rate_limit=True
         )
         
         # Search queries for positive NOI content
@@ -1000,60 +1093,75 @@ async def search_noi_tweets(db: Session = Depends(get_db)):
         new_tweets_count = 0
         
         for query in search_queries:
-            # Search Twitter (get last 24 hours)
-            tweets = client.search_recent_tweets(
-                query=query,
-                max_results=20,
-                tweet_fields=['created_at', 'public_metrics', 'author_id'],
-                expansions=['author_id'],
-                user_fields=['username', 'name']
-            )
-            
-            if not tweets.data:
-                continue
-            
-            # Create user lookup
-            users = {user.id: user for user in tweets.includes['users']} if tweets.includes else {}
-            
-            for tweet in tweets.data:
-                # Check if we already have this tweet
-                existing = db.query(CommunityTweet).filter(
-                    CommunityTweet.tweet_id == tweet.id
-                ).first()
-                
-                if existing:
-                    continue
-                
-                # Get author info
-                author = users.get(tweet.author_id)
-                if not author:
-                    continue
-                
-                # Simple sentiment filter - exclude tweets with negative keywords
-                negative_keywords = ['hate', 'controversial', 'attack', 'against', 'anti']
-                if any(keyword in tweet.text.lower() for keyword in negative_keywords):
-                    continue
-                
-                # Save new tweet
-                community_tweet = CommunityTweet(
-                    tweet_id=str(tweet.id),
-                    author_username=author.username,
-                    author_name=author.name,
-                    author_id=str(tweet.author_id),
-                    tweet_text=tweet.text,
-                    tweet_url=f"https://twitter.com/{author.username}/status/{tweet.id}",
-                    created_at_twitter=tweet.created_at,
-                    like_count=tweet.public_metrics['like_count'],
-                    retweet_count=tweet.public_metrics['retweet_count'],
-                    reply_count=tweet.public_metrics['reply_count'],
-                    search_query=query[:200],  # Truncate for storage
-                    sentiment="positive"
+            try:
+                # Try v2 API search
+                tweets = client.search_recent_tweets(
+                    query=query,
+                    max_results=20,
+                    tweet_fields=['created_at', 'public_metrics', 'author_id'],
+                    expansions=['author_id'],
+                    user_fields=['username', 'name']
                 )
                 
-                db.add(community_tweet)
-                new_tweets_count += 1
-            
-            db.commit()
+                if not tweets.data:
+                    continue
+                
+                # Create user lookup
+                users = {user.id: user for user in tweets.includes['users']} if tweets.includes else {}
+                
+                for tweet in tweets.data:
+                    # Check if we already have this tweet
+                    existing = db.query(CommunityTweet).filter(
+                        CommunityTweet.tweet_id == str(tweet.id)
+                    ).first()
+                    
+                    if existing:
+                        continue
+                    
+                    # Get author info
+                    author = users.get(tweet.author_id)
+                    if not author:
+                        continue
+                    
+                    # Simple sentiment filter - exclude tweets with negative keywords
+                    negative_keywords = ['hate', 'controversial', 'attack', 'against', 'anti']
+                    if any(keyword in tweet.text.lower() for keyword in negative_keywords):
+                        continue
+                    
+                    # Save new tweet
+                    community_tweet = CommunityTweet(
+                        tweet_id=str(tweet.id),
+                        author_username=author.username,
+                        author_name=author.name,
+                        author_id=str(tweet.author_id),
+                        tweet_text=tweet.text,
+                        tweet_url=f"https://twitter.com/{author.username}/status/{tweet.id}",
+                        created_at_twitter=tweet.created_at,
+                        like_count=tweet.public_metrics.get('like_count', 0),
+                        retweet_count=tweet.public_metrics.get('retweet_count', 0),
+                        reply_count=tweet.public_metrics.get('reply_count', 0),
+                        search_query=query[:200],
+                        sentiment="positive"
+                    )
+                    
+                    db.add(community_tweet)
+                    new_tweets_count += 1
+                
+            except tweepy.errors.Forbidden as e:
+                # v2 API not available - provide helpful message
+                logger.warning(f"Twitter v2 API not available: {e}")
+                raise HTTPException(
+                    status_code=403,
+                    detail="Twitter API search requires elevated access. Your current API tier (Free/Essential) doesn't support automated search. Please use Manual Search feature instead, or upgrade to Basic tier ($100/month) at https://developer.twitter.com/en/portal/products"
+                )
+            except tweepy.errors.Unauthorized as e:
+                logger.error(f"Twitter auth failed: {e}")
+                raise HTTPException(
+                    status_code=401,
+                    detail="Twitter API authentication failed. Please verify your API credentials in Railway are correct and that your Twitter app has Read permissions enabled."
+                )
+        
+        db.commit()
         
         logger.info(f"✅ Found {new_tweets_count} new NOI tweets")
         
@@ -1063,9 +1171,16 @@ async def search_noi_tweets(db: Session = Depends(get_db)):
             "message": f"Discovered {new_tweets_count} new NOI-related tweets"
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Twitter search failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Search failed: {str(e)}. Your Twitter API tier may not support automated search. Try the Manual Search feature instead."
+        )
 
 
 @app.get("/api/community/tweets")
