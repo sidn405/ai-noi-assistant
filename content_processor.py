@@ -45,8 +45,11 @@ class ContentProcessor:
         else:
             logger.info("ℹ️ AWS S3 not configured - using local storage")
         
-        # OpenAI Configuration
-        openai.api_key = os.getenv('OPENAI_API_KEY')
+        # OpenAI Configuration - simple initialization
+        self.openai_api_key = os.getenv('OPENAI_API_KEY')
+        if self.openai_api_key:
+            openai.api_key = self.openai_api_key
+            logger.info("✅ OpenAI API initialized")
     
     def upload_to_s3(self, file_path: str, object_name: str = None) -> Optional[str]:
         """
@@ -101,8 +104,21 @@ class ContentProcessor:
         try:
             logger.info(f"🎤 Transcribing: {file_path}")
             
+            # Check file exists and size
+            file_size = os.path.getsize(file_path)
+            if file_size == 0:
+                logger.error(f"❌ File is empty: {file_path}")
+                return None
+            
+            logger.info(f"📊 File size: {file_size / 1024 / 1024:.2f} MB")
+            
+            # Use OpenAI Whisper API with correct syntax
             with open(file_path, 'rb') as audio_file:
-                transcript = openai.audio.transcriptions.create(
+                # Use the global openai module (version 1.3.5 compatible)
+                from openai import OpenAI
+                client = OpenAI(api_key=self.openai_api_key)
+                
+                transcript = client.audio.transcriptions.create(
                     model="whisper-1",
                     file=audio_file,
                     response_format="text"
@@ -113,6 +129,8 @@ class ContentProcessor:
             
         except Exception as e:
             logger.error(f"❌ Transcription failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
     
     def extract_quotes(self, text: str, num_quotes: int = 10, source: str = None) -> List[Dict]:
@@ -130,6 +148,10 @@ class ContentProcessor:
         try:
             logger.info(f"💭 Extracting {num_quotes} quotes from {len(text)} characters")
             
+            # Initialize OpenAI client
+            from openai import OpenAI
+            client = OpenAI(api_key=self.openai_api_key)
+            
             prompt = f"""Extract {num_quotes} powerful, meaningful quotes from this Nation of Islam content.
             
 Focus on:
@@ -140,7 +162,7 @@ Focus on:
 - Justice and truth
 
 Content:
-{text}
+{text[:4000]}
 
 Return ONLY a JSON array with this exact format:
 [
@@ -153,7 +175,7 @@ Return ONLY a JSON array with this exact format:
 
 Make quotes concise (under 280 characters for Twitter). Extract the most powerful statements."""
 
-            response = openai.chat.completions.create(
+            response = client.chat.completions.create(
                 model="gpt-4-turbo-preview",
                 messages=[
                     {
@@ -165,25 +187,43 @@ Make quotes concise (under 280 characters for Twitter). Extract the most powerfu
                         "content": prompt
                     }
                 ],
-                response_format={"type": "json_object"},
-                temperature=0.7
+                temperature=0.7,
+                max_tokens=2000
             )
             
             # Parse response
             content = response.choices[0].message.content
             
-            # Handle if GPT wrapped in quotes object
-            if content.strip().startswith('{'):
-                data = json.loads(content)
-                quotes = data.get('quotes', [])
-            else:
-                quotes = json.loads(content)
+            # Clean up the response - remove markdown code blocks if present
+            content = content.strip()
+            if content.startswith('```json'):
+                content = content[7:]
+            if content.startswith('```'):
+                content = content[3:]
+            if content.endswith('```'):
+                content = content[:-3]
+            content = content.strip()
             
-            logger.info(f"✅ Extracted {len(quotes)} quotes")
-            return quotes
+            # Parse JSON
+            try:
+                quotes = json.loads(content)
+                
+                # Ensure it's a list
+                if isinstance(quotes, dict):
+                    quotes = quotes.get('quotes', [])
+                
+                logger.info(f"✅ Extracted {len(quotes)} quotes")
+                return quotes
+                
+            except json.JSONDecodeError as je:
+                logger.error(f"Failed to parse JSON response: {je}")
+                logger.error(f"Response content: {content}")
+                return []
             
         except Exception as e:
             logger.error(f"❌ Quote extraction failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return []
     
     def read_text_file(self, file_path: str) -> Optional[str]:

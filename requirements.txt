@@ -8,7 +8,7 @@ sqlalchemy==2.0.23
 psycopg2-binary==2.9.9
 
 # OpenAI
-openai==1.3.5
+openai==1.12.0
 
 # Social Media APIs
 tweepy==4.14.0
