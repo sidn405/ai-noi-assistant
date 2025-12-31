@@ -4,7 +4,7 @@ A legitimate social media management and discovery platform
 """
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, JSON, Float
 from sqlalchemy.ext.declarative import declarative_base
@@ -26,6 +26,21 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
+
+# Progress tracking for real-time updates
+import asyncio
+from collections import defaultdict
+from typing import AsyncGenerator
+
+# Global progress tracker
+progress_tracker = defaultdict(lambda: {
+    "status": "idle",
+    "progress": 0,
+    "message": "",
+    "current_step": "",
+    "total_steps": 0,
+    "completed_steps": 0
+})
 
 # Initialize FastAPI
 app = FastAPI(title="NOI Social Command Center")
@@ -178,6 +193,34 @@ from content_processor import ContentProcessor
 # Initialize content processor
 content_processor = ContentProcessor()
 
+# ==================== PROGRESS TRACKING ====================
+
+async def progress_stream(task_id: str) -> AsyncGenerator[str, None]:
+    """Stream progress updates via Server-Sent Events"""
+    while True:
+        progress = progress_tracker[task_id]
+        
+        # Send progress update
+        yield f"data: {json.dumps(progress)}\n\n"
+        
+        # Stop streaming if complete or failed
+        if progress["status"] in ["complete", "failed"]:
+            break
+        
+        await asyncio.sleep(0.5)  # Update every 500ms
+
+@app.get("/api/progress/{task_id}")
+async def get_progress(task_id: str):
+    """Stream real-time progress updates"""
+    return StreamingResponse(
+        progress_stream(task_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        }
+    )
+
 # ==================== CONTENT MANAGEMENT ====================
 
 @app.post("/api/content/upload")
@@ -235,6 +278,20 @@ async def process_and_extract_quotes(
     This is the all-in-one endpoint you need!
     """
     
+    # Generate task ID for progress tracking
+    task_id = str(uuid.uuid4())
+    
+    # Initialize progress
+    progress_tracker[task_id] = {
+        "status": "uploading",
+        "progress": 0,
+        "message": "Uploading file...",
+        "current_step": "upload",
+        "total_steps": 5,
+        "completed_steps": 0,
+        "task_id": task_id
+    }
+    
     # Create upload directory
     upload_dir = Path("uploads")
     upload_dir.mkdir(exist_ok=True)
@@ -279,10 +336,27 @@ async def process_and_extract_quotes(
     logger.info(f"📊 File saved: {file_size:,} bytes")
     
     if file_size == 0:
+        progress_tracker[task_id]["status"] = "failed"
+        progress_tracker[task_id]["message"] = "File is empty"
         raise HTTPException(status_code=400, detail="Uploaded file is empty or upload failed")
     
-    # AUTOMATED PROCESSING
+    # Update progress
+    progress_tracker[task_id].update({
+        "progress": 20,
+        "message": f"File uploaded: {file_size / 1024 / 1024:.1f} MB",
+        "completed_steps": 1,
+        "current_step": "processing"
+    })
+    
+    # AUTOMATED PROCESSING with progress tracking
     try:
+        # Update progress
+        progress_tracker[task_id].update({
+            "progress": 30,
+            "message": "Starting transcription...",
+            "current_step": "transcribe"
+        })
+        
         result = content_processor.process_file(
             file_path=str(file_path),
             file_type=content_type,
@@ -294,7 +368,17 @@ async def process_and_extract_quotes(
         if not result['success']:
             # Log the error but still try to save what we can
             logger.error(f"Processing error: {result['error']}")
+            progress_tracker[task_id]["status"] = "failed"
+            progress_tracker[task_id]["message"] = result['error']
             raise HTTPException(status_code=500, detail=result['error'])
+        
+        # Update progress
+        progress_tracker[task_id].update({
+            "progress": 80,
+            "message": f"Extracted {len(result['quotes'])} quotes, saving...",
+            "completed_steps": 3,
+            "current_step": "saving"
+        })
         
         # Save content to DB
         db_content = Content(
@@ -326,8 +410,19 @@ async def process_and_extract_quotes(
         
         logger.info(f"✅ Successfully processed {title}: {len(saved_quotes)} quotes extracted")
         
+        # Mark as complete
+        progress_tracker[task_id].update({
+            "status": "complete",
+            "progress": 100,
+            "message": f"✅ Complete! Extracted {len(saved_quotes)} quotes",
+            "completed_steps": 5,
+            "current_step": "done",
+            "quotes_count": len(saved_quotes)
+        })
+        
         return {
             "success": True,
+            "task_id": task_id,
             "content_id": db_content.id,
             "transcription_length": len(result['transcription']) if result['transcription'] else 0,
             "quotes_extracted": len(saved_quotes),
@@ -341,6 +436,8 @@ async def process_and_extract_quotes(
         raise
     except Exception as e:
         logger.error(f"Processing failed: {str(e)}")
+        progress_tracker[task_id]["status"] = "failed"
+        progress_tracker[task_id]["message"] = str(e)
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 

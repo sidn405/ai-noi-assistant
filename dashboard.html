@@ -572,7 +572,22 @@
                             <input type="file" id="autoFileInput" name="file" accept="video/*,audio/*,.txt,.doc,.docx,.pdf" style="display:none;">
                         </div>
                     </div>
-                    <button type="submit" class="btn btn-primary">🚀 Process & Extract Quotes</button>
+                    <button type="submit" class="btn btn-primary" id="processBtn">🚀 Process & Extract Quotes</button>
+                    
+                    <!-- Progress Bar -->
+                    <div id="progressContainer" style="display: none; margin-top: 20px;">
+                        <div class="progress-header" style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                            <span id="progressMessage">Processing...</span>
+                            <span id="progressPercent">0%</span>
+                        </div>
+                        <div class="progress-bar-container" style="width: 100%; height: 30px; background: var(--bg-dark); border-radius: 15px; overflow: hidden; border: 2px solid var(--border-color);">
+                            <div id="progressBar" style="height: 100%; width: 0%; background: linear-gradient(90deg, var(--noi-gold), #ffd700); transition: width 0.3s ease; display: flex; align-items: center; justify-content: center; color: #000; font-weight: bold; font-size: 14px;"></div>
+                        </div>
+                        <div id="progressSteps" style="margin-top: 10px; color: var(--text-secondary); font-size: 0.9rem;">
+                            Step <span id="currentStep">0</span> of <span id="totalSteps">5</span>: <span id="stepName">Starting...</span>
+                        </div>
+                    </div>
+                    
                     <p style="color: var(--text-secondary); margin-top: 10px; font-size: 0.9rem;">
                         System will automatically transcribe (if audio/video), extract quotes, and save to database.
                     </p>
@@ -844,10 +859,21 @@
             const formData = new FormData(form);
             
             // Show processing indicator
-            const submitBtn = form.querySelector('button[type="submit"]');
+            const submitBtn = document.getElementById('processBtn');
             const originalText = submitBtn.innerHTML;
-            submitBtn.innerHTML = '⏳ Processing... This may take 2-5 minutes';
+            submitBtn.innerHTML = '⏳ Processing...';
             submitBtn.disabled = true;
+            
+            // Show progress bar
+            const progressContainer = document.getElementById('progressContainer');
+            progressContainer.style.display = 'block';
+            
+            const progressBar = document.getElementById('progressBar');
+            const progressMessage = document.getElementById('progressMessage');
+            const progressPercent = document.getElementById('progressPercent');
+            const currentStepEl = document.getElementById('currentStep');
+            const totalStepsEl = document.getElementById('totalSteps');
+            const stepNameEl = document.getElementById('stepName');
             
             try {
                 const response = await fetch('/api/content/process-and-extract', {
@@ -857,36 +883,89 @@
                 
                 const result = await response.json();
                 
-                if (result.success) {
-                    alert(`
+                if (result.success && result.task_id) {
+                    // Connect to SSE for real-time progress
+                    const eventSource = new EventSource(`/api/progress/${result.task_id}`);
+                    
+                    eventSource.onmessage = function(e) {
+                        const progress = JSON.parse(e.data);
+                        
+                        // Update progress bar
+                        progressBar.style.width = progress.progress + '%';
+                        progressBar.textContent = progress.progress >= 20 ? progress.progress + '%' : '';
+                        progressPercent.textContent = progress.progress + '%';
+                        progressMessage.textContent = progress.message;
+                        
+                        // Update steps
+                        currentStepEl.textContent = progress.completed_steps;
+                        totalStepsEl.textContent = progress.total_steps;
+                        stepNameEl.textContent = progress.current_step;
+                        
+                        // If complete, close connection and celebrate!
+                        if (progress.status === 'complete') {
+                            eventSource.close();
+                            
+                            // Play success sound
+                            const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBSuBzvLZiTUHGGS57OmjTQ0PVK3n8LllHAU2jdXzzn0pBSh+zPLaizsIFGO57+yhUBELTKXh8bllHQU3kdry0YU2Bhljuevqo04LDlGn4/G4Zx4FNpLX8s+AKwYnfcnw2Yo8BxRhuOzroVERC0ul4fG5Zx4ENI/Y8tKDNQYZY7nr66NODQ9Sp+Xxu2kfBTaP1/PQgiwGKH7M8tuKOwcUY7jt66FRDwpJounwtGMbBjiP2fPSgjkGF2G46eurTwwOUank8rtpIAU2kdfy0YM0Bxhju+zpo04PClCl4/K8aiAFN5HX89GCNAcYY7vt6qNNDQ5QpuXyu2ogBTiS2PPRgjQHGWS67emhUQ8LTqXj8bxqHwU3ktf00YI1CBhjuuvqpE4PC06l4/C9aiAFN5PY89GCNQgXY7rrq6RODwtOpeP1v2wiBTiT2PTSgzYIGWS76uqjTg0OT6bj87xqIAU4lNf00YM2Bxhju+vpp04NDlCm5fO8ayEFN5LY9NGEN...'); // Success chime
+                            audio.play().catch(e => console.log('Audio play failed:', e));
+                            
+                            // Show success message
+                            alert(`
 🎉 Processing Complete!
 
 📝 Title: ${formData.get('title')}
-💭 Quotes Extracted: ${result.quotes_extracted}
+💭 Quotes Extracted: ${progress.quotes_count || result.quotes_extracted}
 📄 Transcription: ${result.transcription_length} characters
 ${result.s3_url ? '☁️ Uploaded to S3: Yes' : '💾 Stored locally'}
 
 ✅ All quotes have been added to your Quote Library!
 Go to the Quotes tab to see them.
-                    `);
+                            `);
+                            
+                            // Reset form
+                            form.reset();
+                            progressContainer.style.display = 'none';
+                            const fileDisplay = form.querySelector('.file-display');
+                            if (fileDisplay) {
+                                fileDisplay.remove();
+                            }
+                            
+                            // Refresh data
+                            loadQuotes();
+                            loadAnalytics();
+                        } else if (progress.status === 'failed') {
+                            eventSource.close();
+                            alert('❌ Processing failed: ' + progress.message);
+                            progressContainer.style.display = 'none';
+                        }
+                    };
                     
-                    // Reset form
-                    form.reset();
+                    eventSource.onerror = function() {
+                        eventSource.close();
+                        // Still check if we got results
+                        if (result.success) {
+                            alert(`
+🎉 Processing Complete!
+
+📝 Title: ${formData.get('title')}
+💭 Quotes Extracted: ${result.quotes_extracted}
+
+✅ Check the Quotes tab!
+                            `);
+                            form.reset();
+                            loadQuotes();
+                            loadAnalytics();
+                        }
+                        progressContainer.style.display = 'none';
+                    };
                     
-                    // Clear file display
-                    const fileDisplay = form.querySelector('.file-display');
-                    if (fileDisplay) {
-                        fileDisplay.remove();
-                    }
-                    
-                    // Refresh data
-                    loadQuotes();
-                    loadAnalytics();
                 } else {
                     alert('❌ Processing failed: ' + (result.detail || 'Unknown error'));
+                    progressContainer.style.display = 'none';
                 }
             } catch (error) {
                 alert('❌ Error: ' + error.message);
+                progressContainer.style.display = 'none';
             } finally {
                 submitBtn.innerHTML = originalText;
                 submitBtn.disabled = false;

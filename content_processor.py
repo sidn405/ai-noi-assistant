@@ -272,35 +272,60 @@ class ContentProcessor:
             from openai import OpenAI
             client = OpenAI(
                 api_key=self.openai_api_key,
-                timeout=120.0,
+                timeout=180.0,  # 3 minute timeout
                 max_retries=2
             )
             
-            # Limit text to avoid token limits
-            text_sample = text[:8000] if len(text) > 8000 else text
+            # For large text, sample intelligently
+            # Take beginning, middle, and end to get diverse quotes
+            max_chars = 12000
+            if len(text) > max_chars:
+                # Take 40% from beginning, 40% from middle, 20% from end
+                start_chunk = int(max_chars * 0.4)
+                middle_chunk = int(max_chars * 0.4)
+                end_chunk = max_chars - start_chunk - middle_chunk
+                
+                text_sample = (
+                    text[:start_chunk] + 
+                    " ... " +
+                    text[len(text)//2 - middle_chunk//2 : len(text)//2 + middle_chunk//2] +
+                    " ... " +
+                    text[-end_chunk:]
+                )
+            else:
+                text_sample = text
             
-            prompt = f"""Extract {num_quotes} powerful, meaningful quotes from this Nation of Islam content.
-            
+            prompt = f"""Extract EXACTLY {num_quotes} powerful, meaningful quotes from this Nation of Islam content.
+
+CRITICAL: You MUST extract exactly {num_quotes} quotes. Not 10. Not 5. Exactly {num_quotes}.
+
 Focus on:
 - Wisdom and knowledge
 - Empowerment and self-improvement
 - Unity and community
 - Faith and spirituality
 - Justice and truth
+- Self-reliance and economic empowerment
+- Historical knowledge and truth
 
 Content:
 {text_sample}
 
-Return ONLY a JSON array with this exact format:
+Return a JSON array with EXACTLY {num_quotes} quote objects.
+Each quote MUST be under 280 characters for Twitter.
+
+Format:
 [
   {{
-    "quote_text": "the quote here",
-    "author": "attribution if mentioned, otherwise '{source or 'Unknown'}'",
-    "category": "one of: wisdom, faith, unity, empowerment, knowledge, justice"
-  }}
+    "quote_text": "powerful quote here",
+    "author": "{source or 'Unknown'}",
+    "category": "wisdom|faith|unity|empowerment|knowledge|justice"
+  }},
+  ... ({num_quotes} total quotes)
 ]
 
-Make quotes concise (under 280 characters for Twitter). Extract the most powerful statements."""
+DO NOT include any markdown formatting, code blocks, or explanations.
+ONLY return the raw JSON array with {num_quotes} quotes."""
 
             logger.info("🔄 Sending to GPT-4...")
             
@@ -309,15 +334,15 @@ Make quotes concise (under 280 characters for Twitter). Extract the most powerfu
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are an expert at identifying powerful, meaningful quotes from religious and educational content. Return only valid JSON."
+                        "content": f"You are an expert at extracting powerful quotes from religious and educational content. You MUST return EXACTLY {num_quotes} quotes in valid JSON format. No more, no less."
                     },
                     {
                         "role": "user",
                         "content": prompt
                     }
                 ],
-                temperature=0.7,
-                max_tokens=2000
+                temperature=0.8,  # Higher for more diversity
+                max_tokens=4000  # Increased for more quotes
             )
             
             # Parse response
@@ -341,12 +366,17 @@ Make quotes concise (under 280 characters for Twitter). Extract the most powerfu
                 if isinstance(quotes, dict):
                     quotes = quotes.get('quotes', [])
                 
-                logger.info(f"✅ Extracted {len(quotes)} quotes")
+                logger.info(f"✅ Extracted {len(quotes)} quotes (requested: {num_quotes})")
+                
+                # If we got fewer than requested, warn but continue
+                if len(quotes) < num_quotes:
+                    logger.warning(f"⚠️ Only extracted {len(quotes)} quotes, requested {num_quotes}")
+                
                 return quotes
                 
             except json.JSONDecodeError as je:
                 logger.error(f"Failed to parse JSON response: {je}")
-                logger.error(f"Response content: {content[:500]}")
+                logger.error(f"Response content (first 500 chars): {content[:500]}")
                 return []
             
         except Exception as e:
