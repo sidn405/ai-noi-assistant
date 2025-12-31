@@ -19,6 +19,11 @@ import json
 from pathlib import Path
 import hashlib
 import uuid
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -255,13 +260,15 @@ async def process_and_extract_quotes(
         )
         
         if not result['success']:
+            # Log the error but still try to save what we can
+            logger.error(f"Processing error: {result['error']}")
             raise HTTPException(status_code=500, detail=result['error'])
         
         # Save content to DB
         db_content = Content(
             title=title,
             content_type=content_type,
-            file_path=result.get('s3_url') or str(file_path),
+            file_path=result.get('s3_url') or str(file_path),  # Use S3 URL if available, otherwise local
             transcription=result['transcription'],
             extracted_quotes=result['quotes'],
             source=source
@@ -285,6 +292,8 @@ async def process_and_extract_quotes(
         
         db.commit()
         
+        logger.info(f"✅ Successfully processed {title}: {len(saved_quotes)} quotes extracted")
+        
         return {
             "success": True,
             "content_id": db_content.id,
@@ -292,10 +301,14 @@ async def process_and_extract_quotes(
             "quotes_extracted": len(saved_quotes),
             "quotes": result['quotes'],
             "s3_url": result.get('s3_url'),
+            "storage": "AWS S3" if result.get('s3_url') else "Local",
             "message": f"✅ Processed {title}: extracted {len(saved_quotes)} quotes"
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Processing failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 

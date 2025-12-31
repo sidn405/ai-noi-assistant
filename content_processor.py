@@ -31,15 +31,19 @@ class ContentProcessor:
             os.getenv('AWS_SECRET_ACCESS_KEY'),
             self.bucket_name
         ]):
-            self.s3_client = boto3.client(
-                's3',
-                aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
-                aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
-                region_name=os.getenv('AWS_REGION', 'us-east-1')
-            )
-            logger.info(f"✅ AWS S3 initialized: {self.bucket_name}")
+            try:
+                self.s3_client = boto3.client(
+                    's3',
+                    aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+                    aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+                    region_name=os.getenv('AWS_REGION', 'us-east-1')
+                )
+                logger.info(f"✅ AWS S3 initialized: {self.bucket_name}")
+            except Exception as e:
+                logger.warning(f"⚠️ AWS S3 initialization failed: {e} - using local storage")
+                self.s3_client = None
         else:
-            logger.warning("⚠️ AWS credentials not found - using local storage")
+            logger.info("ℹ️ AWS S3 not configured - using local storage")
         
         # OpenAI Configuration
         openai.api_key = os.getenv('OPENAI_API_KEY')
@@ -259,9 +263,13 @@ Make quotes concise (under 280 characters for Twitter). Extract the most powerfu
             # Step 1: Upload to S3 (optional)
             if upload_to_s3 and self.s3_client:
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                filename = Path(file_path).name
-                s3_key = f"noi_content/{timestamp}_{filename}"
+                file_ext = Path(file_path).suffix  # Get file extension (.mp3, .mp4, etc.)
+                filename = Path(file_path).stem  # Get filename without extension
+                s3_key = f"noi_content/{timestamp}_{filename}{file_ext}"  # Include extension
                 result['s3_url'] = self.upload_to_s3(file_path, s3_key)
+                logger.info(f"📁 File uploaded to S3: {s3_key}")
+            elif upload_to_s3 and not self.s3_client:
+                logger.info("ℹ️ S3 not configured - file stored locally only")
             
             # Step 2: Get text content
             text_content = None
