@@ -190,13 +190,20 @@ class ContentProcessor:
                     
                     # Update progress if task_id provided
                     if task_id:
-                        from __main__ import progress_tracker
-                        progress = 30 + int((i / total_chunks) * 40)  # 30-70%
-                        progress_tracker[task_id].update({
-                            "progress": progress,
-                            "message": f"Transcribing chunk {i}/{total_chunks}...",
-                            "completed_steps": 2
-                        })
+                        try:
+                            # Import here to avoid circular dependency
+                            import sys
+                            if 'main' in sys.modules:
+                                main_module = sys.modules['main']
+                                if hasattr(main_module, 'progress_tracker'):
+                                    progress = 30 + int((i / total_chunks) * 40)  # 30-70%
+                                    main_module.progress_tracker[task_id].update({
+                                        "progress": progress,
+                                        "message": f"Transcribing chunk {i}/{total_chunks}...",
+                                        "completed_steps": 2
+                                    })
+                        except Exception as e:
+                            logger.debug(f"Could not update progress: {e}")
                     
                     chunk_size = os.path.getsize(chunk_path) / 1024 / 1024
                     logger.info(f"📊 Chunk size: {chunk_size:.2f} MB")
@@ -224,13 +231,19 @@ class ContentProcessor:
                 
                 # Update progress
                 if task_id:
-                    from __main__ import progress_tracker
-                    progress_tracker[task_id].update({
-                        "progress": 70,
-                        "message": f"Transcription complete: {len(full_transcript)} characters",
-                        "completed_steps": 3,
-                        "current_step": "extract"
-                    })
+                    try:
+                        import sys
+                        if 'main' in sys.modules:
+                            main_module = sys.modules['main']
+                            if hasattr(main_module, 'progress_tracker'):
+                                main_module.progress_tracker[task_id].update({
+                                    "progress": 70,
+                                    "message": f"Transcription complete: {len(full_transcript)} characters",
+                                    "completed_steps": 3,
+                                    "current_step": "extract"
+                                })
+                    except Exception as e:
+                        logger.debug(f"Could not update progress: {e}")
                 
                 # Clean up chunk files
                 for chunk_path in chunk_paths:
@@ -263,13 +276,19 @@ class ContentProcessor:
                 
                 # Update progress
                 if task_id:
-                    from __main__ import progress_tracker
-                    progress_tracker[task_id].update({
-                        "progress": 60,
-                        "message": f"Transcription complete: {len(transcript)} characters",
-                        "completed_steps": 3,
-                        "current_step": "extract"
-                    })
+                    try:
+                        import sys
+                        if 'main' in sys.modules:
+                            main_module = sys.modules['main']
+                            if hasattr(main_module, 'progress_tracker'):
+                                main_module.progress_tracker[task_id].update({
+                                    "progress": 60,
+                                    "message": f"Transcription complete: {len(transcript)} characters",
+                                    "completed_steps": 3,
+                                    "current_step": "extract"
+                                })
+                    except Exception as e:
+                        logger.debug(f"Could not update progress: {e}")
                 
                 return transcript
             

@@ -94,9 +94,9 @@ def process_file_background(
             db.close()
             return
         
-        # Update: Saving to database
+        # Update: Quote extraction complete
         progress_tracker[task_id].update({
-            "progress": 85,
+            "progress": 80,
             "message": f"Extracted {len(result['quotes'])} quotes, saving to database...",
             "completed_steps": 4,
             "current_step": "saving"
