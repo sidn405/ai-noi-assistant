@@ -248,6 +248,43 @@ class DiscoveredProfile(Base):
     notes = Column(Text, nullable=True)
     contact_status = Column(String(50), default="discovered")  # discovered, contacted, responded, member
     discovered_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CommunityTweet(Base):
+    """NOI-related tweets discovered for community engagement"""
+    __tablename__ = "community_tweets"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    tweet_id = Column(String(255), unique=True, index=True)
+    author_username = Column(String(255))
+    author_name = Column(String(255))
+    author_id = Column(String(255))
+    tweet_text = Column(Text)
+    tweet_url = Column(String(500))
+    created_at_twitter = Column(DateTime)
+    
+    # Engagement metrics from Twitter
+    like_count = Column(Integer, default=0)
+    retweet_count = Column(Integer, default=0)
+    reply_count = Column(Integer, default=0)
+    
+    # Our engagement tracking
+    we_liked = Column(Boolean, default=False)
+    we_retweeted = Column(Boolean, default=False)
+    we_replied = Column(Boolean, default=False)
+    we_followed = Column(Boolean, default=False)
+    
+    # Engagement timestamps
+    liked_at = Column(DateTime, nullable=True)
+    retweeted_at = Column(DateTime, nullable=True)
+    replied_at = Column(DateTime, nullable=True)
+    followed_at = Column(DateTime, nullable=True)
+    
+    # Metadata
+    search_query = Column(String(500))
+    sentiment = Column(String(50), default="positive")  # positive, neutral, negative
+    discovered_at = Column(DateTime, default=datetime.utcnow)
+    our_reply_text = Column(Text, nullable=True)
     last_activity = Column(DateTime, nullable=True)
     tags = Column(JSON, nullable=True)
 
@@ -926,6 +963,375 @@ async def get_analytics_overview(db: Session = Depends(get_db)):
         "content_library": total_content,
         "recent_posts": len(recent_posts)
     }
+
+
+# ==================== COMMUNITY FINDER ====================
+
+@app.post("/api/community/add-manual")
+async def add_tweet_manually(
+    tweet_url: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Manually add a tweet to community finder
+    For users without elevated Twitter API access
+    """
+    import re
+    
+    # Extract tweet ID from URL
+    # Formats: twitter.com/username/status/123456 or x.com/username/status/123456
+    match = re.search(r'/status/(\d+)', tweet_url)
+    if not match:
+        raise HTTPException(status_code=400, detail="Invalid Twitter URL. Must be in format: https://twitter.com/username/status/123456")
+    
+    tweet_id = match.group(1)
+    
+    # Check if already exists
+    existing = db.query(CommunityTweet).filter(
+        CommunityTweet.tweet_id == tweet_id
+    ).first()
+    
+    if existing:
+        raise HTTPException(status_code=400, detail="This tweet is already in your community list!")
+    
+    # Try to fetch tweet details with Twitter API
+    try:
+        import tweepy
+        
+        api_key = os.getenv("TWITTER_API_KEY")
+        api_secret = os.getenv("TWITTER_API_SECRET")
+        access_token = os.getenv("TWITTER_ACCESS_TOKEN")
+        access_secret = os.getenv("TWITTER_ACCESS_SECRET")
+        
+        client = tweepy.Client(
+            consumer_key=api_key,
+            consumer_secret=api_secret,
+            access_token=access_token,
+            access_token_secret=access_secret
+        )
+        
+        # Fetch tweet details
+        tweet = client.get_tweet(
+            id=tweet_id,
+            tweet_fields=['created_at', 'public_metrics', 'author_id'],
+            expansions=['author_id'],
+            user_fields=['username', 'name']
+        )
+        
+        if not tweet.data:
+            raise HTTPException(status_code=404, detail="Tweet not found or is private")
+        
+        # Get author info
+        author = tweet.includes['users'][0] if tweet.includes and 'users' in tweet.includes else None
+        if not author:
+            raise HTTPException(status_code=404, detail="Could not fetch author information")
+        
+        # Save to database
+        community_tweet = CommunityTweet(
+            tweet_id=tweet_id,
+            author_username=author.username,
+            author_name=author.name,
+            author_id=str(tweet.data.author_id),
+            tweet_text=tweet.data.text,
+            tweet_url=tweet_url,
+            created_at_twitter=tweet.data.created_at,
+            like_count=tweet.data.public_metrics.get('like_count', 0),
+            retweet_count=tweet.data.public_metrics.get('retweet_count', 0),
+            reply_count=tweet.data.public_metrics.get('reply_count', 0),
+            search_query="manual_add",
+            sentiment="positive"
+        )
+        
+        db.add(community_tweet)
+        db.commit()
+        
+        logger.info(f"✅ Manually added tweet from @{author.username}")
+        
+        return {
+            "success": True,
+            "message": f"Added tweet from @{author.username}!"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to add tweet: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to add tweet: {str(e)}")
+
+
+@app.post("/api/community/search")
+async def search_noi_tweets(db: Session = Depends(get_db)):
+    """Search Twitter for NOI-related content"""
+    import tweepy
+    
+    # Twitter API setup
+    api_key = os.getenv("TWITTER_API_KEY")
+    api_secret = os.getenv("TWITTER_API_SECRET")
+    access_token = os.getenv("TWITTER_ACCESS_TOKEN")
+    access_secret = os.getenv("TWITTER_ACCESS_SECRET")
+    
+    if not all([api_key, api_secret, access_token, access_secret]):
+        raise HTTPException(status_code=500, detail="Twitter API credentials not configured")
+    
+    try:
+        # Try v2 API first (requires Basic/Pro tier - $100/month)
+        client = tweepy.Client(
+            consumer_key=api_key,
+            consumer_secret=api_secret,
+            access_token=access_token,
+            access_token_secret=access_secret,
+            wait_on_rate_limit=True
+        )
+        
+        # Search queries for positive NOI content
+        search_queries = [
+            '("Nation of Islam" OR #NOI OR "Minister Farrakhan") (wisdom OR truth OR powerful OR inspiring) -hate -controversial lang:en',
+            '#MinisterFarrakhan (knowledge OR unity OR empowerment) -hate lang:en',
+            '"Nation of Islam" (education OR self-reliance OR community) -hate lang:en'
+        ]
+        
+        new_tweets_count = 0
+        
+        for query in search_queries:
+            try:
+                # Try v2 API search
+                tweets = client.search_recent_tweets(
+                    query=query,
+                    max_results=20,
+                    tweet_fields=['created_at', 'public_metrics', 'author_id'],
+                    expansions=['author_id'],
+                    user_fields=['username', 'name']
+                )
+                
+                if not tweets.data:
+                    continue
+                
+                # Create user lookup
+                users = {user.id: user for user in tweets.includes['users']} if tweets.includes else {}
+                
+                for tweet in tweets.data:
+                    # Check if we already have this tweet
+                    existing = db.query(CommunityTweet).filter(
+                        CommunityTweet.tweet_id == str(tweet.id)
+                    ).first()
+                    
+                    if existing:
+                        continue
+                    
+                    # Get author info
+                    author = users.get(tweet.author_id)
+                    if not author:
+                        continue
+                    
+                    # Simple sentiment filter - exclude tweets with negative keywords
+                    negative_keywords = ['hate', 'controversial', 'attack', 'against', 'anti']
+                    if any(keyword in tweet.text.lower() for keyword in negative_keywords):
+                        continue
+                    
+                    # Save new tweet
+                    community_tweet = CommunityTweet(
+                        tweet_id=str(tweet.id),
+                        author_username=author.username,
+                        author_name=author.name,
+                        author_id=str(tweet.author_id),
+                        tweet_text=tweet.text,
+                        tweet_url=f"https://twitter.com/{author.username}/status/{tweet.id}",
+                        created_at_twitter=tweet.created_at,
+                        like_count=tweet.public_metrics.get('like_count', 0),
+                        retweet_count=tweet.public_metrics.get('retweet_count', 0),
+                        reply_count=tweet.public_metrics.get('reply_count', 0),
+                        search_query=query[:200],
+                        sentiment="positive"
+                    )
+                    
+                    db.add(community_tweet)
+                    new_tweets_count += 1
+                
+            except tweepy.errors.Forbidden as e:
+                # v2 API not available - provide helpful message
+                logger.warning(f"Twitter v2 API not available: {e}")
+                raise HTTPException(
+                    status_code=403,
+                    detail="Twitter API search requires elevated access. Your current API tier (Free/Essential) doesn't support automated search. Please use Manual Search feature instead, or upgrade to Basic tier ($100/month) at https://developer.twitter.com/en/portal/products"
+                )
+            except tweepy.errors.Unauthorized as e:
+                logger.error(f"Twitter auth failed: {e}")
+                raise HTTPException(
+                    status_code=401,
+                    detail="Twitter API authentication failed. Please verify your API credentials in Railway are correct and that your Twitter app has Read permissions enabled."
+                )
+        
+        db.commit()
+        
+        logger.info(f"✅ Found {new_tweets_count} new NOI tweets")
+        
+        return {
+            "success": True,
+            "new_tweets": new_tweets_count,
+            "message": f"Discovered {new_tweets_count} new NOI-related tweets"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Twitter search failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Search failed: {str(e)}. Your Twitter API tier may not support automated search. Try the Manual Search feature instead."
+        )
+
+
+@app.get("/api/community/tweets")
+async def get_community_tweets(
+    limit: int = 20,
+    skip: int = 0,
+    engaged_only: bool = False,
+    db: Session = Depends(get_db)
+):
+    """Get discovered NOI tweets"""
+    
+    query = db.query(CommunityTweet)
+    
+    if engaged_only:
+        query = query.filter(
+            (CommunityTweet.we_liked == True) |
+            (CommunityTweet.we_retweeted == True) |
+            (CommunityTweet.we_replied == True)
+        )
+    else:
+        # Show non-engaged tweets first
+        query = query.filter(
+            CommunityTweet.we_liked == False,
+            CommunityTweet.we_retweeted == False,
+            CommunityTweet.we_replied == False
+        )
+    
+    tweets = query.order_by(CommunityTweet.created_at_twitter.desc()).offset(skip).limit(limit).all()
+    
+    return [
+        {
+            "id": tweet.id,
+            "tweet_id": tweet.tweet_id,
+            "author_username": tweet.author_username,
+            "author_name": tweet.author_name,
+            "tweet_text": tweet.tweet_text,
+            "tweet_url": tweet.tweet_url,
+            "created_at": tweet.created_at_twitter.isoformat() if tweet.created_at_twitter else None,
+            "like_count": tweet.like_count,
+            "retweet_count": tweet.retweet_count,
+            "reply_count": tweet.reply_count,
+            "we_liked": tweet.we_liked,
+            "we_retweeted": tweet.we_retweeted,
+            "we_replied": tweet.we_replied,
+            "we_followed": tweet.we_followed,
+            "our_reply_text": tweet.our_reply_text
+        }
+        for tweet in tweets
+    ]
+
+
+@app.post("/api/community/engage/{tweet_db_id}")
+async def engage_with_tweet(
+    tweet_db_id: int,
+    action: str = Form(...),  # 'like', 'retweet', 'reply', 'follow'
+    reply_text: Optional[str] = Form(None),
+    db: Session = Depends(get_db)
+):
+    """Engage with a community tweet"""
+    import tweepy
+    
+    # Get tweet from database
+    tweet = db.query(CommunityTweet).filter(CommunityTweet.id == tweet_db_id).first()
+    if not tweet:
+        raise HTTPException(status_code=404, detail="Tweet not found")
+    
+    # Twitter API setup
+    api_key = os.getenv("TWITTER_API_KEY")
+    api_secret = os.getenv("TWITTER_API_SECRET")
+    access_token = os.getenv("TWITTER_ACCESS_TOKEN")
+    access_secret = os.getenv("TWITTER_ACCESS_SECRET")
+    
+    try:
+        client = tweepy.Client(
+            consumer_key=api_key,
+            consumer_secret=api_secret,
+            access_token=access_token,
+            access_token_secret=access_secret
+        )
+        
+        if action == "like":
+            client.like(tweet.tweet_id)
+            tweet.we_liked = True
+            tweet.liked_at = datetime.utcnow()
+            message = "Tweet liked!"
+            
+        elif action == "retweet":
+            client.retweet(tweet.tweet_id)
+            tweet.we_retweeted = True
+            tweet.retweeted_at = datetime.utcnow()
+            message = "Tweet retweeted!"
+            
+        elif action == "reply":
+            if not reply_text:
+                raise HTTPException(status_code=400, detail="Reply text required")
+            client.create_tweet(text=reply_text, in_reply_to_tweet_id=tweet.tweet_id)
+            tweet.we_replied = True
+            tweet.replied_at = datetime.utcnow()
+            tweet.our_reply_text = reply_text
+            message = "Reply posted!"
+            
+        elif action == "follow":
+            client.follow_user(tweet.author_id)
+            tweet.we_followed = True
+            tweet.followed_at = datetime.utcnow()
+            message = f"Followed @{tweet.author_username}!"
+            
+        else:
+            raise HTTPException(status_code=400, detail="Invalid action")
+        
+        db.commit()
+        
+        logger.info(f"✅ {action} - @{tweet.author_username}")
+        
+        return {
+            "success": True,
+            "action": action,
+            "message": message
+        }
+        
+    except Exception as e:
+        logger.error(f"Engagement failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to {action}: {str(e)}")
+
+
+@app.get("/api/community/stats")
+async def get_community_stats(db: Session = Depends(get_db)):
+    """Get community engagement statistics"""
+    
+    total_discovered = db.query(CommunityTweet).count()
+    total_liked = db.query(CommunityTweet).filter(CommunityTweet.we_liked == True).count()
+    total_retweeted = db.query(CommunityTweet).filter(CommunityTweet.we_retweeted == True).count()
+    total_replied = db.query(CommunityTweet).filter(CommunityTweet.we_replied == True).count()
+    total_followed = db.query(CommunityTweet).filter(CommunityTweet.we_followed == True).count()
+    
+    # New this week
+    week_ago = datetime.utcnow() - timedelta(days=7)
+    new_this_week = db.query(CommunityTweet).filter(
+        CommunityTweet.discovered_at >= week_ago
+    ).count()
+    
+    return {
+        "total_discovered": total_discovered,
+        "total_engaged": total_liked + total_retweeted + total_replied,
+        "total_liked": total_liked,
+        "total_retweeted": total_retweeted,
+        "total_replied": total_replied,
+        "total_followed": total_followed,
+        "new_this_week": new_this_week
+    }
+
 
 # ==================== STATIC FILES & DASHBOARD ====================
 

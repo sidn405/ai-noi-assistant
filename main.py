@@ -721,6 +721,98 @@ async def create_quote(quote: QuoteCreate, db: Session = Depends(get_db)):
 
 # ==================== SOCIAL MEDIA POSTING ====================
 
+@app.post("/api/posts/post-now")
+async def post_now(
+    platform: str = Form(...),
+    content: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    """Post immediately to social media platform"""
+    
+    try:
+        if platform == "twitter":
+            # Twitter posting
+            import tweepy
+            
+            api_key = os.getenv("TWITTER_API_KEY")
+            api_secret = os.getenv("TWITTER_API_SECRET")
+            access_token = os.getenv("TWITTER_ACCESS_TOKEN")
+            access_secret = os.getenv("TWITTER_ACCESS_SECRET")
+            
+            if not all([api_key, api_secret, access_token, access_secret]):
+                raise HTTPException(status_code=500, detail="Twitter credentials not configured")
+            
+            client = tweepy.Client(
+                consumer_key=api_key,
+                consumer_secret=api_secret,
+                access_token=access_token,
+                access_token_secret=access_secret
+            )
+            
+            # Post tweet
+            response = client.create_tweet(text=content)
+            
+            logger.info(f"✅ Posted to Twitter: {response.data['id']}")
+            
+            return {
+                "success": True,
+                "platform": "twitter",
+                "post_id": str(response.data['id']),
+                "message": "Posted to Twitter successfully!",
+                "url": f"https://twitter.com/i/web/status/{response.data['id']}"
+            }
+            
+        elif platform == "facebook":
+            # Facebook posting
+            import facebook
+            
+            access_token = os.getenv("FACEBOOK_ACCESS_TOKEN")
+            page_id = os.getenv("FACEBOOK_PAGE_ID")
+            
+            if not access_token:
+                raise HTTPException(
+                    status_code=500, 
+                    detail="Facebook access token not configured. Please add FACEBOOK_ACCESS_TOKEN to Railway variables."
+                )
+            
+            if not page_id:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Facebook Page ID not configured. Please add FACEBOOK_PAGE_ID to Railway variables."
+                )
+            
+            # Initialize Facebook Graph API
+            graph = facebook.GraphAPI(access_token)
+            
+            # Post to Facebook Page
+            response = graph.put_object(
+                parent_object=page_id,
+                connection_name="feed",
+                message=content
+            )
+            
+            logger.info(f"✅ Posted to Facebook: {response['id']}")
+            
+            return {
+                "success": True,
+                "platform": "facebook",
+                "post_id": response['id'],
+                "message": "Posted to Facebook successfully!",
+                "url": f"https://facebook.com/{response['id']}"
+            }
+            
+        else:
+            raise HTTPException(status_code=400, detail=f"Platform '{platform}' not supported yet")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to post to {platform}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to post: {str(e)}")
+
+
 @app.post("/api/posts/schedule")
 async def schedule_post(post: PostCreate, db: Session = Depends(get_db)):
     """Schedule a post to social media"""

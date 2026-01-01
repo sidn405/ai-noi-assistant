@@ -679,7 +679,31 @@
         <!-- POSTING SECTION -->
         <div id="posting" class="section">
             <div class="card">
-                <h2 class="card-title">Schedule Social Media Post</h2>
+                <h2 class="card-title">📤 Post to Social Media</h2>
+                
+                <!-- Quick Post Form -->
+                <div style="background: rgba(212, 175, 55, 0.1); border: 2px solid var(--noi-gold); border-radius: 8px; padding: 20px; margin-bottom: 20px;">
+                    <h3 style="margin-top: 0; color: var(--noi-gold);">⚡ Post Now</h3>
+                    <form id="quickPostForm" onsubmit="postNow(event)">
+                        <div class="form-group">
+                            <label>Platform</label>
+                            <select name="platform" required>
+                                <option value="twitter">Twitter/X</option>
+                                <option value="facebook">Facebook</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Post Content</label>
+                            <textarea name="content" rows="5" required placeholder="Share NOI wisdom, quotes, or updates..."></textarea>
+                            <small style="color: var(--text-secondary);">💡 Tip: Keep under 280 characters for Twitter</small>
+                        </div>
+                        <button type="submit" class="btn btn-primary">📤 Post Now</button>
+                        <button type="button" class="btn btn-secondary" onclick="generatePost()">🤖 Generate with AI</button>
+                    </form>
+                </div>
+                
+                <!-- Schedule Post Form -->
+                <h3>📅 Schedule for Later</h3>
                 <form id="postForm" onsubmit="schedulePost(event)">
                     <div class="form-group">
                         <label>Platform</label>
@@ -698,7 +722,6 @@
                         <input type="datetime-local" name="scheduled_time" required>
                     </div>
                     <button type="submit" class="btn btn-primary">Schedule Post</button>
-                    <button type="button" class="btn btn-secondary" onclick="generatePost()">Generate with AI</button>
                 </form>
             </div>
 
@@ -1182,6 +1205,38 @@ Go to the Quotes tab to see them.
                 `).join('');
             } catch (error) {
                 console.error('Failed to load quotes:', error);
+            }
+        }
+
+        // Post Now (Immediate)
+        async function postNow(event) {
+            event.preventDefault();
+            const formData = new FormData(event.target);
+            const platform = formData.get('platform');
+            const content = formData.get('content');
+            
+            if (!confirm(`Post this to ${platform.charAt(0).toUpperCase() + platform.slice(1)} now?`)) {
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/posts/post-now', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert(`✅ ${result.message}\n\nView at: ${result.url}`);
+                    event.target.reset();
+                    loadAnalytics();
+                } else {
+                    alert('❌ Failed: ' + (result.detail || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('Failed to post:', error);
+                alert('❌ Failed to post: ' + error.message);
             }
         }
 
